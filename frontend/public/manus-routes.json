@@ -1,0 +1,20 @@
+{
+  "routes": [
+    { "path": "/", "title": "RentFlow" },
+    { "path": "/login", "title": "Sign in" },
+    { "path": "/register", "title": "Create account" },
+    { "path": "/forgot-password", "title": "Reset password" },
+    { "path": "/reset-password", "title": "Choose a new password" },
+    { "path": "/dashboard", "title": "Dashboard" },
+    { "path": "/properties", "title": "Properties" },
+    { "path": "/units", "title": "Units" },
+    { "path": "/tenants", "title": "Tenants" },
+    { "path": "/leases", "title": "Leases" },
+    { "path": "/ledger", "title": "Ledger" },
+    { "path": "/payments", "title": "Payments" },
+    { "path": "/payments/review", "title": "Payment review" },
+    { "path": "/reports", "title": "Reports" },
+    { "path": "/tenant", "title": "Tenant account" },
+    { "path": "/tenant/payments", "title": "Tenant payments" }
+  ]
+}

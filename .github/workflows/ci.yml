@@ -1,0 +1,78 @@
+name: RentFlow CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Go API — lint, test, build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: rentflow_test
+          POSTGRES_USER: rentflow
+          POSTGRES_PASSWORD: rentflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rentflow -d rentflow_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgres://rentflow:rentflow@localhost:5432/rentflow_test?sslmode=disable
+      APP_ENV: test
+      COOKIE_SECURE: "false"
+      SMS_PROVIDER: mock
+      JWT_SECRET: ci-only-test-secret-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Verify Go formatting
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: go build -trimpath -o /tmp/rentflow-api ./cmd/api
+
+  frontend:
+    name: Next.js — lint, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@10.18.0 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build

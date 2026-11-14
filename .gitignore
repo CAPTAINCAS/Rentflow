@@ -1,0 +1,23 @@
+# Local secrets; keep the backend example file trackable.
+**/.env
+**/.env.*
+!**/.env.example
+backend/.env
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/.next/
+frontend/out/
+frontend/coverage/
+*.tsbuildinfo
+
+# Go build artifacts
+/backend/bin/
+/backend/dist/
+/backend/*.test
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
