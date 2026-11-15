@@ -28,7 +28,7 @@ ENV NODE_ENV=production \
     PORT=3000 \
     COOKIE_SECURE=true
 COPY --from=api-build --chown=node:node /out/rentflow-api /app/rentflow-api
-COPY --from=api-build --chown=node:node /src/backend/migrations /app/backend/migrations
+COPY --from=api-build --chown=node:node /src/backend/migrations /app/migrations
 COPY --from=web-build --chown=node:node /app/frontend/.next/standalone/ /app/frontend/
 COPY --from=web-build --chown=node:node /app/frontend/.next/static/ /app/frontend/.next/static/
 COPY --from=web-build --chown=node:node /app/frontend/public/ /app/frontend/public/

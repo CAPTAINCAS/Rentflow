@@ -8,5 +8,10 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["lib/**/*.test.ts"],
+    // NEXT_PUBLIC_* values are inlined by next.config.ts at build time; give the
+    // tests the same defaults so the API client is exercised realistically.
+    env: {
+      NEXT_PUBLIC_API_BASE_URL: process.env.NEXT_PUBLIC_API_BASE_URL ?? "",
+    },
   },
 });

@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm, type Resolver } from "react-hook-form";
-import { api, asRecord, collection, firstValue, stringValue, type JsonRecord } from "@/lib/api";
+import { api, apiUrl, asRecord, collection, firstValue, stringValue, type JsonRecord } from "@/lib/api";
 import { formatDate, formatMoney } from "@/lib/format";
 import { buildTenantLedger } from "@/lib/ledger";
 import { useSession } from "@/components/app-shell";
@@ -300,7 +300,7 @@ function Payments({ review = false }: { review?: boolean }) {
 }
 
 function Reports() {
-  return <><Header eyebrow="ACCOUNT REPORTS" title="Reports" description="Download account-backed CSV files for a selected collection month and current arrears." /><div className="report-links"><div className="report-card"><strong>Monthly collection</strong><span>Completed collection transactions for the chosen month (defaults to the current month).</span><a href="/api/v1/reports/collections.csv" download>Download collections CSV ↗</a></div><div className="report-card"><strong>Arrears register</strong><span>Open invoice balances with the number of days overdue.</span><a href="/api/v1/reports/arrears.csv" download>Download arrears CSV ↗</a></div></div><p className="side-note" style={{ marginTop: 18 }}>Report downloads use your account session and include only records in this landlord account.</p></>;
+  return <><Header eyebrow="ACCOUNT REPORTS" title="Reports" description="Download account-backed CSV files for a selected collection month and current arrears." /><div className="report-links"><div className="report-card"><strong>Monthly collection</strong><span>Completed collection transactions for the chosen month (defaults to the current month).</span><a href={apiUrl("/reports/collections.csv")} download>Download collections CSV ↗</a></div><div className="report-card"><strong>Arrears register</strong><span>Open invoice balances with the number of days overdue.</span><a href={apiUrl("/reports/arrears.csv")} download>Download arrears CSV ↗</a></div></div><p className="side-note" style={{ marginTop: 18 }}>Report downloads use your account session and include only records in this landlord account.</p></>;
 }
 
 function TenantHome({ paymentsOnly = false }: { paymentsOnly?: boolean }) {

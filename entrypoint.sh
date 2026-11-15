@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Single-container gateway defaults. The API process is the public entry point
+# and reverse-proxies page requests to the Next.js process on port 3001.
 export COOKIE_SECURE="${COOKIE_SECURE:-true}"
 export WEB_ORIGIN="${WEB_ORIGIN:-http://127.0.0.1:3001}"
+export MIGRATIONS_DIR="${MIGRATIONS_DIR:-/app/migrations}"
 
 (
   cd /app/frontend
@@ -11,7 +14,7 @@ export WEB_ORIGIN="${WEB_ORIGIN:-http://127.0.0.1:3001}"
 web_pid=$!
 
 (
-  cd /app/backend
+  cd /app
   PORT=3000 /app/rentflow-api
 ) &
 api_pid=$!

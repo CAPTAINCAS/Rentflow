@@ -50,6 +50,16 @@ jobs:
         run: go test ./...
       - name: Build
         run: go build -trimpath -o /tmp/rentflow-api ./cmd/api
+      - name: Verify startup configuration guard
+        # The API must refuse to start with a short secret rather than silently
+        # accepting it; this is the failure mode seen in the Vercel runtime log.
+        run: |
+          set -e
+          if JWT_SECRET=short /tmp/rentflow-api; then
+            echo "API started with a short JWT_SECRET; expected a non-zero exit"
+            exit 1
+          fi
+          echo "short JWT_SECRET rejected as expected"
 
   frontend:
     name: Next.js — lint, test, build
@@ -62,10 +72,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Enable pinned pnpm
         run: corepack enable && corepack prepare pnpm@10.18.0 --activate
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Lint

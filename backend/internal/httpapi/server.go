@@ -39,6 +39,7 @@ type Server struct {
 	Log               *slog.Logger
 	HTTP              *http.Client
 	SMS               SMSProvider
+	proxy             http.Handler
 	tokenMu           sync.Mutex
 	darajaTokenValue  string
 	darajaTokenExpiry time.Time
@@ -64,6 +65,11 @@ type apiError struct {
 func New(c config.Config, db *pgxpool.Pool, l *slog.Logger) *Server {
 	return &Server{C: c, DB: db, Queries: dbgen.New(db), Log: l, HTTP: &http.Client{Timeout: 15 * time.Second}, SMS: newSMS(c, l)}
 }
+
+// Handler returns the public API and health routes only. Page proxying is a
+// separate concern (see ProxyWeb) so the API can also run behind a managed
+// platform that routes /api/v1 to this service and everything else to the
+// Next.js frontend.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(30*time.Second))
@@ -121,9 +127,28 @@ func (s *Server) Handler() http.Handler {
 		a.Get("/reports/arrears.csv", s.arrearsCSV)
 	})
 	r.Mount("/api/v1", api)
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/api/") {
+			writeErr(w, 404, "not_found", "route not found")
+			return
+		}
+		if s.proxy == nil {
+			writeErr(w, 404, "not_found", "this deployment serves the API only; open the frontend origin for pages")
+			return
+		}
+		s.proxy.ServeHTTP(w, req)
+	})
+	return s.bind(r)
+}
+
+// ProxyWeb builds the single-container gateway handler: the API plus a reverse
+// proxy for everything else to the Next.js process. Deployments where the
+// platform routes /api/v1 to the API and pages to the frontend should use
+// Handler instead.
+func (s *Server) ProxyWeb() (http.Handler, error) {
 	target, err := url.Parse(s.C.WebOrigin)
-	if err != nil {
-		panic("invalid WEB_ORIGIN: " + err.Error())
+	if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
+		return nil, fmt.Errorf("WEB_ORIGIN is not a valid http(s) web origin: %q", s.C.WebOrigin)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	old := proxy.Director
@@ -138,15 +163,10 @@ func (s *Server) Handler() http.Handler {
 		s.Log.Error("web proxy failed", "error", e)
 		http.Error(w, "web application unavailable", http.StatusBadGateway)
 	}
-	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		if strings.HasPrefix(req.URL.Path, "/api/v1/") {
-			writeErr(w, 404, "not_found", "route not found")
-			return
-		}
-		proxy.ServeHTTP(w, req)
-	})
-	return s.bind(r)
+	s.proxy = proxy
+	return s.Handler(), nil
 }
+
 func scheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"

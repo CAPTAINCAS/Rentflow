@@ -12,7 +12,14 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /out/rentflow /app/rentflow
 COPY migrations /app/migrations
-ENV PORT=3000
+# Fail fast with a readable message instead of a stack trace when the runtime
+# environment is incomplete (JWT_SECRET, DATABASE_URL, TLS settings).
+ENV APP_ENV=production \
+    PORT=3000 \
+    COOKIE_SECURE=true \
+    SMS_PROVIDER=mock
 EXPOSE 3000
 USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:3000/healthz || exit 1
 CMD ["/app/rentflow"]

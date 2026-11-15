@@ -38,10 +38,13 @@ services:
     environment:
       APP_ENV: development
       PORT: "3000"
+      # Gateway mode: the API also reverse-proxies page requests to the web service.
       WEB_ORIGIN: http://web:3001
       DATABASE_URL: postgres://rentflow:rentflow@postgres:5432/rentflow?sslmode=disable
       COOKIE_SECURE: "false"
       SMS_PROVIDER: mock
+      # Local placeholder only; override in the ignored backend/.env.
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-at-least-32-chars}
     ports:
       - "3000:3000"
     depends_on:

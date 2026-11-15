@@ -12,6 +12,22 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Base path of the RentFlow API.
+ *
+ * - Relative (default) when the browser talks to a same-origin gateway that
+ *   serves both the frontend and `/api/v1` (the Docker image, or a platform
+ *   rewrite/proxy).
+ * - Absolute when the API is deployed separately from the frontend, set with
+ *   `NEXT_PUBLIC_API_BASE_URL=https://api.example.com` at build time.
+ */
+export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+export function apiUrl(path: string): string {
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE}/api/v1${suffix}`;
+}
+
 function csrfCookie(): string | null {
   if (typeof document === "undefined") return null;
   const part = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith("rf_csrf="));
@@ -30,7 +46,7 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
     const token = csrfCookie();
     if (token) headers.set("X-CSRF-Token", token);
   }
-  const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: "include", cache: "no-store" });
+  const response = await fetch(apiUrl(path), { ...init, headers, credentials: "include", cache: "no-store" });
   const contentType = response.headers.get("content-type") ?? "";
   let body: unknown = null;
   if (response.status !== 204) {

@@ -6,6 +6,10 @@ Go 1.22+ / chi API and gateway. It serves `/api/v1/*` and `/healthz` on port 300
 
 Configure `DATABASE_URL`, a `JWT_SECRET` of at least 32 characters, and optional runtime settings. `make dev-api` loads ignored `backend/.env`; `.env.example` contains placeholders only. Apply migrations from this directory with `migrate -path migrations -database "$DATABASE_URL" up` if running outside the API entrypoint. Generate typed queries with `sqlc generate`.
 
+Startup validates the whole environment before it binds a port and reports every problem at once, for example a short `JWT_SECRET`, a non-PostgreSQL or `sslmode=disable` `DATABASE_URL` outside development, `COOKIE_SECURE=false` outside development, or a missing `MPESA_CALLBACK_TOKEN`. Database credentials are redacted from logs. Migrations are read from `MIGRATIONS_DIR`, then `/app/migrations`, then `./migrations`.
+
+`WEB_ORIGIN` selects the runtime shape. Leave it empty for an API-only service (the managed deployment where the platform routes `/api/v1/*` here and pages to a separate Next.js deployment); set it to the Next.js origin, such as `http://127.0.0.1:3001`, only for the single-container gateway image that also proxies page requests.
+
 Daraja is sandbox-only at `https://sandbox.safaricom.co.ke`; no live-money mode is implemented. Configure the supplied sandbox values only in ignored `backend/.env`. The STK callback URL must eventually be the operator's public HTTPS origin plus `/api/v1/mpesa/stk-callback`; C2B validation and confirmation URLs must also be public HTTPS before registration. In non-development environments, set a random `MPESA_CALLBACK_TOKEN` of at least 32 characters and append `?token=<same-value>` to all three callback URLs. Callbacks fail closed without this token and C2B callbacks must also match `MPESA_SHORTCODE`; never register an unprotected public callback. The Africa's Talking adapter is optional; `SMS_PROVIDER=mock` logs metadata only and sends nothing.
 
 ## Response and security contracts

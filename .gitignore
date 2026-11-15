@@ -1,4 +1,4 @@
-# Local secrets; keep the backend example file trackable.
+# Local secrets; keep the example files trackable.
 **/.env
 **/.env.*
 !**/.env.example

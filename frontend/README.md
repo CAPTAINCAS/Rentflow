@@ -1,6 +1,8 @@
 # RentFlow frontend
 
-Mobile-first Next.js App Router and TypeScript interface for Kenyan landlords/property managers and tenants. Uses Tailwind CSS, TanStack Query, React Hook Form, and Zod. Next listens on port 3001; the Go gateway owns public/Preview port 3000 and proxies page requests. Browser API requests use relative same-origin `/api/v1/*` paths.
+Mobile-first Next.js App Router and TypeScript interface for Kenyan landlords/property managers and tenants. Uses Tailwind CSS, TanStack Query, React Hook Form, and Zod. Next listens on port 3001; the Go gateway owns public/Preview port 3000 and proxies page requests in the single-container image.
+
+Browser API requests default to relative same-origin `/api/v1/*` paths. When the API is deployed on a different origin (for example Vercel hosting this frontend and Railway/Render hosting the Go API), set `NEXT_PUBLIC_API_BASE_URL` to that origin without a trailing slash or `/api/v1` suffix; it is inlined at build time by [`next.config.ts`](next.config.ts). See [`docs/vercel-deployment.md`](../docs/vercel-deployment.md).
 
 ## Screens
 
