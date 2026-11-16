@@ -11,6 +11,13 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_API_BASE_URL: apiBase,
     NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL ?? "",
   },
+  async rewrites() {
+    // Same-origin proxy: /api/v1/* → Render backend
+    // Keeps session cookies first-party (browser sees Vercel domain)
+    const apiOrigin = process.env.API_ORIGIN;
+    if (!apiOrigin) return [];
+    return [{ source: "/api/v1/:path*", destination: `${apiOrigin}/api/v1/:path*` }];
+  },
 };
 
 export default nextConfig;
