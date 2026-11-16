@@ -4,9 +4,13 @@
 # or override PNPM if you keep a local pnpm binary.
 SHELL := /bin/sh
 DATABASE_URL ?= postgres://rentflow:rentflow@localhost:5432/rentflow?sslmode=disable
+# Isolated test database. Tests MUST use this, never DATABASE_URL, so a local
+# test run can never touch the development or production database. The name
+# matches the CI service (rentflow_test) so local and CI behaviour align.
+TEST_DATABASE_URL ?= postgres://rentflow:rentflow@localhost:5432/rentflow_test?sslmode=disable
 PNPM ?= corepack pnpm
 
-.PHONY: help install up down dev-api dev-web migrate-up migrate-down sqlc lint test build ci check-env verify-backend
+.PHONY: help install up down dev-api dev-web migrate-up migrate-down sqlc lint test test-db test-integration build ci check-env verify-backend
 
 help:
 	@echo "install      Install frontend dependencies with the pinned pnpm"
@@ -17,7 +21,9 @@ help:
 	@echo "migrate-down Roll back the most recent migration"
 	@echo "sqlc         Regenerate typed query code"
 	@echo "lint         gofmt + go vet + eslint + tsc"
-	@echo "test         go test ./... and frontend vitest"
+	@echo "test         go test ./... (isolated TEST_DATABASE_URL) and frontend vitest"
+	@echo "test-db      Create the isolated test database if it does not exist"
+	@echo "test-integration  Run backend integration tests against TEST_DATABASE_URL"
 	@echo "build        Build the API binary and the Next.js standalone bundle"
 	@echo "ci           lint + test + build"
 	@echo "check-env    Fail with a clear message when required API env vars are missing"
@@ -52,8 +58,23 @@ lint:
 	cd frontend && $(PNPM) lint && $(PNPM) typecheck
 
 test:
-	cd backend && go test ./...
+	cd backend && DATABASE_URL="$(TEST_DATABASE_URL)" APP_ENV=test COOKIE_SECURE=false SMS_PROVIDER=mock go test ./...
 	cd frontend && $(PNPM) test
+
+# Create the isolated test database. Uses the postgres superuser on the local
+# Compose service; safe to run repeatedly. Never points at production.
+test-db:
+	@psql "$$(TEST_DATABASE_URL)" -c 'SELECT 1' >/dev/null 2>&1 && { echo "test database already exists"; exit 0; } || \
+	{ echo "creating test database..."; \
+	  createdb -h localhost -U rentflow rentflow_test 2>/dev/null || \
+	  psql -h localhost -U rentflow -d postgres -c 'CREATE DATABASE rentflow_test' || \
+	  { echo "could not create rentflow_test; start the Compose postgres service first (make up)"; exit 1; }; }
+
+# Integration tests run against the isolated test database only. They are added
+# in Phase 1; until then this target is a no-op placeholder.
+test-integration:
+	@echo "No integration tests yet (added in Phase 1)"
+	cd backend && DATABASE_URL="$(TEST_DATABASE_URL)" APP_ENV=test COOKIE_SECURE=false SMS_PROVIDER=mock go test ./... -run TestIntegration -count=1
 
 build:
 	cd backend && go build -trimpath -o /tmp/rentflow-api ./cmd/api
