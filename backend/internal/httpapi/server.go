@@ -125,6 +125,13 @@ func (s *Server) Handler() http.Handler {
 		a.Post("/mpesa/c2b/register", s.registerC2B)
 		a.Get("/reports/collections.csv", s.collectionsCSV)
 		a.Get("/reports/arrears.csv", s.arrearsCSV)
+		a.Get("/platform/accounts", s.listPlatformAccounts)
+		a.Get("/platform/overview", s.platformOverview)
+		a.Get("/platform/subscription-payments", s.listPlatformSubscriptionPayments)
+		a.Get("/platform/revenue", s.platformRevenue)
+		a.Get("/platform/subscriptions", s.listPlatformSubscriptions)
+		a.Get("/platform/audit-logs", s.listPlatformAuditLogs)
+		s.registerMaintenanceRoutes(a)
 	})
 	r.Mount("/api/v1", api)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
@@ -190,6 +197,41 @@ func decode(r *http.Request, v any) error {
 	d.DisallowUnknownFields()
 	return d.Decode(v)
 }
+
+// commonPasswords is a small local blocklist of commonly compromised passwords.
+var commonPasswords = map[string]bool{
+	"password": true, "password123": true, "123456789012": true,
+	"qwertyuiop": true, "letmein12345": true, "welcome12345": true,
+	"admin1234567": true, "rentflow1234": true,
+}
+
+// validatePassword enforces the RentFlow password policy.
+func validatePassword(pw string) error {
+	if len(pw) < 12 {
+		return fmt.Errorf("password must be at least 12 characters")
+	}
+	if len(pw) > 128 {
+		return fmt.Errorf("password must be at most 128 characters")
+	}
+	if commonPasswords[strings.ToLower(strings.TrimSpace(pw))] {
+		return fmt.Errorf("password is too common")
+	}
+	return nil
+}
+
+// checkRateLimit returns true if the request is allowed. Uses Postgres shared storage.
+func (s *Server) checkRateLimit(r *http.Request, key string, limit int, window time.Duration) bool {
+	now := time.Now()
+	windowStart := now.Truncate(window)
+	_, _ = s.DB.Exec(r.Context(), `DELETE FROM rate_limits WHERE expires_at < $1`, now)
+	var count int
+	err := s.DB.QueryRow(r.Context(), `INSERT INTO rate_limits(key,window_start,count,expires_at) VALUES($1,$2,1,$3) ON CONFLICT (key,window_start) DO UPDATE SET count=rate_limits.count+1 RETURNING count`, key, windowStart, windowStart.Add(window)).Scan(&count)
+	if err != nil {
+		return true // fail open
+	}
+	return count <= limit
+}
+
 func principal(r *http.Request) Principal { p, _ := r.Context().Value(ctxKey{}).(Principal); return p }
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,8 +269,27 @@ func (s *Server) parseAccess(t string) (Principal, error) {
 }
 func (s *Server) manager(w http.ResponseWriter, r *http.Request) bool {
 	p := principal(r)
-	if p.Role != "landlord" && p.Role != "agent" {
-		writeErr(w, 403, "forbidden", "landlord or agent access required")
+	if p.Role != "landlord" && p.Role != "agent" && p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "landlord, agent, or super_admin access required")
+		return false
+	}
+	// Super admins have platform-level access and are not bound to a single account.
+	if p.Role == "super_admin" {
+		return true
+	}
+	// Landlords and agents must belong to an active (non-suspended) account.
+	if p.AccountID == "" {
+		writeErr(w, 403, "forbidden", "account not associated with principal")
+		return false
+	}
+	var status string
+	e := s.DB.QueryRow(r.Context(), `SELECT subscription_status FROM accounts WHERE id=$1`, p.AccountID).Scan(&status)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not verify account status")
+		return false
+	}
+	if status == "suspended" {
+		writeErr(w, 403, "forbidden", "account is suspended")
 		return false
 	}
 	return true
@@ -237,6 +298,156 @@ func (s *Server) account(r *http.Request) (string, bool) {
 	p := principal(r)
 	return p.AccountID, p.AccountID != ""
 }
+
+// isSuperAdmin returns true if the principal is a platform super_admin.
+func isSuperAdmin(p Principal) bool { return p.Role == "super_admin" }
+
+// isLandlordOrAgent returns true if the principal is a landlord or agent.
+func isLandlordOrAgent(p Principal) bool { return p.Role == "landlord" || p.Role == "agent" }
+
+// agentAssignedPropertyIDs returns the property IDs an agent is assigned to.
+// Returns nil (no restriction) for landlords, super_admins, and tenants.
+// Returns an error if the query fails.
+func (s *Server) agentAssignedPropertyIDs(r *http.Request) ([]string, error) {
+	p := principal(r)
+	if p.Role != "agent" {
+		return nil, nil
+	}
+	rows, e := s.DB.Query(r.Context(), `SELECT property_id FROM property_assignments WHERE agent_id=$1 AND account_id=$2`, p.ID, p.AccountID)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// effectiveAccountID resolves the account context for the current request.
+// Landlords and agents always use their own account_id.
+// Super admins must specify an account_id query parameter (?account_id=) for
+// account-scoped operations; without one, the operation returns empty results
+// (platform-scoped access is not implied). Tenants use their own account_id.
+func (s *Server) effectiveAccountID(r *http.Request) (string, error) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		return p.AccountID, nil
+	}
+	// Super admin: look for account_id in query parameter only.
+	// Reading the request body here would consume it for later decoding.
+	if aid := r.URL.Query().Get("account_id"); aid != "" {
+		return aid, nil
+	}
+	return "", nil
+}
+
+// checkPropertyAccess returns true if the principal can access the given property.
+// Landlords and super_admins always have access.
+// Agents must have an assignment in property_assignments.
+// Tenants have access if the property is related to their active lease.
+func (s *Server) checkPropertyAccess(r *http.Request, propertyID string) (bool, error) {
+	p := principal(r)
+	if p.Role == "landlord" || p.Role == "super_admin" {
+		return true, nil
+	}
+	if p.Role == "agent" {
+		var exists bool
+		e := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM property_assignments WHERE agent_id=$1 AND account_id=$2 AND property_id=$3)`, p.ID, p.AccountID, propertyID).Scan(&exists)
+		return exists, e
+	}
+	// tenant: check if property is related to their active lease
+	if p.TenantID == "" {
+		return false, nil
+	}
+	var exists bool
+	e := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.tenant_id=$1 AND u.property_id=$2 AND l.status='active')`, p.TenantID, propertyID).Scan(&exists)
+	return exists, e
+}
+
+// checkPropertyAccessByUnit returns true if the principal can access the unit's property.
+// Resolves the unit's property_id and checks agent assignment.
+func (s *Server) checkPropertyAccessByUnit(r *http.Request, unitID, accountID string) (bool, error) {
+	p := principal(r)
+	if p.Role == "landlord" || p.Role == "super_admin" {
+		return true, nil
+	}
+	if p.Role == "agent" {
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT property_id FROM units WHERE account_id=$1 AND id=$2`, accountID, unitID).Scan(&propertyID)
+		if e != nil {
+			return false, e
+		}
+		return s.checkPropertyAccess(r, propertyID)
+	}
+	if p.Role == "tenant" {
+		if p.TenantID == "" {
+			return false, nil
+		}
+		var exists bool
+		e := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.tenant_id=$1 AND l.account_id=$2 AND l.id=$3 AND l.status='active')`, p.TenantID, accountID, unitID).Scan(&exists)
+		return exists, e
+	}
+	return false, nil
+}
+
+// checkPropertyAccessByLease returns true if the principal can access the lease's property.
+// Resolves the lease's property_id through units and checks agent assignment.
+func (s *Server) checkPropertyAccessByLease(r *http.Request, leaseID, accountID string) (bool, error) {
+	p := principal(r)
+	if p.Role == "landlord" || p.Role == "super_admin" {
+		return true, nil
+	}
+	if p.Role == "agent" {
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT u.property_id FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.account_id=$1 AND l.id=$2`, accountID, leaseID).Scan(&propertyID)
+		if e != nil {
+			return false, e
+		}
+		return s.checkPropertyAccess(r, propertyID)
+	}
+	if p.Role == "tenant" {
+		if p.TenantID == "" {
+			return false, nil
+		}
+		var exists bool
+		e := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM leases l WHERE l.tenant_id=$1 AND l.account_id=$2 AND l.id=$3 AND l.status='active')`, p.TenantID, accountID, leaseID).Scan(&exists)
+		return exists, e
+	}
+	return false, nil
+}
+
+// checkPropertyAccessByTenant returns true if the principal can access the tenant's property.
+// Resolves the tenant's active lease -> unit -> property and checks agent assignment.
+func (s *Server) checkPropertyAccessByTenant(r *http.Request, tenantID, accountID string) (bool, error) {
+	p := principal(r)
+	if p.Role == "landlord" || p.Role == "super_admin" {
+		return true, nil
+	}
+	if p.Role == "agent" {
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT u.property_id FROM tenants t JOIN leases l ON l.tenant_id=t.id AND l.account_id=t.account_id JOIN units u ON u.id=l.unit_id WHERE t.id=$1 AND t.account_id=$2 AND l.status='active' LIMIT 1`, tenantID, accountID).Scan(&propertyID)
+		if e != nil {
+			return false, e
+		}
+		return s.checkPropertyAccess(r, propertyID)
+	}
+	if p.Role == "tenant" {
+		if p.TenantID == "" {
+			return false, nil
+		}
+		return p.TenantID == tenantID, nil
+	}
+	return false, nil
+}
+
+// filterByAgentProperties removed: it was a no-op and unused. Agent property
+// filtering is performed explicitly in each handler via agentAssignedPropertyIDs.
 func uuidParam(r *http.Request) string { return chi.URLParam(r, "id") }
 func validID(v string) bool {
 	_, e := strconv.ParseUint(strings.ReplaceAll(v, "-", ""), 16, 128)
@@ -246,7 +457,7 @@ func validID(v string) bool {
 // Authentication
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name, Email, Phone, Password, Role string }
-	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || len(in.Password) < 10 {
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || validatePassword(in.Password) != nil {
 		writeErr(w, 400, "invalid_request", "name, valid email, and password of at least 10 characters are required")
 		return
 	}
@@ -254,8 +465,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = "landlord"
 	}
-	if role != "landlord" && role != "agent" {
-		writeErr(w, 400, "invalid_role", "registration is available for landlord or agent accounts only")
+	if role != "landlord" {
+		writeErr(w, 400, "invalid_role", "public registration is available for landlord accounts only")
 		return
 	}
 	hash, e := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
@@ -285,6 +496,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	s.issueSession(w, r, Principal{ID: uid, Role: role, AccountID: aid, Name: in.Name, Email: strings.ToLower(in.Email)})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+	if !s.checkRateLimit(r, "login:ip:"+ip, 10, time.Minute) {
+		writeErr(w, 429, "rate_limited", "too many attempts, try again later")
+		return
+	}
 	var in struct{ Email, Password string }
 	if decode(r, &in) != nil {
 		writeErr(w, 400, "invalid_request", "email and password are required")
@@ -296,6 +512,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if e != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
 		writeErr(w, 401, "invalid_credentials", "email or password is incorrect")
 		return
+	}
+	// Reject login for suspended accounts (landlords and agents only;
+	// super_admins are platform-level and not bound to a single account).
+	if p.Role != "super_admin" && p.AccountID != "" {
+		var status string
+		if e2 := s.DB.QueryRow(r.Context(), `SELECT subscription_status FROM accounts WHERE id=$1`, p.AccountID).Scan(&status); e2 == nil && status == "suspended" {
+			writeErr(w, 403, "forbidden", "account is suspended")
+			return
+		}
 	}
 	s.issueSession(w, r, p)
 }
@@ -401,6 +626,15 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "invalid_refresh", "account no longer exists")
 		return
 	}
+	// Reject refresh for suspended accounts (landlords and agents only;
+	// super_admins are platform-level and not bound to a single account).
+	if p.Role != "super_admin" && p.AccountID != "" {
+		var status string
+		if e2 := s.DB.QueryRow(r.Context(), `SELECT subscription_status FROM accounts WHERE id=$1`, p.AccountID).Scan(&status); e2 == nil && status == "suspended" {
+			writeErr(w, 403, "forbidden", "account is suspended")
+			return
+		}
+	}
 	s.issueSession(w, r, p)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -447,6 +681,11 @@ func randomToken() (string, error) {
 }
 
 func (s *Server) forgot(w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+	if !s.checkRateLimit(r, "forgot:ip:"+ip, 5, time.Minute) {
+		writeErr(w, 429, "rate_limited", "too many attempts, try again later")
+		return
+	}
 	var in struct {
 		Email string `json:"email"`
 	}
@@ -477,11 +716,16 @@ func (s *Server) forgot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+	if !s.checkRateLimit(r, "reset:ip:"+ip, 5, time.Minute) {
+		writeErr(w, 429, "rate_limited", "too many attempts, try again later")
+		return
+	}
 	var in struct {
 		Token    string `json:"token"`
 		Password string `json:"password"`
 	}
-	if decode(r, &in) != nil || in.Token == "" || len(in.Password) < 10 {
+	if decode(r, &in) != nil || in.Token == "" || validatePassword(in.Password) != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "valid reset token and password of at least 10 characters are required")
 		return
 	}
@@ -594,4 +838,53 @@ func (s *Server) bind(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serverKey{}, s)))
 	})
+}
+
+// BootstrapSuperAdmin creates the first platform super_admin account from
+// configuration environment variables. It is idempotent: if any super_admin
+// user already exists, it does nothing. The bootstrap password is never
+// logged. Call this after migrations have run and the server is constructed.
+// All account and user creation happens inside a single database transaction
+// so a partial failure cannot leave an orphaned account.
+func (s *Server) BootstrapSuperAdmin() {
+	if s.C.SuperAdminEmail == "" || s.C.SuperAdminPassword == "" {
+		return
+	}
+	tx, e := s.DB.Begin(context.Background())
+	if e != nil {
+		s.Log.Warn("super_admin bootstrap could not start transaction", "error", e)
+		return
+	}
+	defer tx.Rollback(context.Background())
+	var exists bool
+	e = tx.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM users WHERE role='super_admin')`).Scan(&exists)
+	if e != nil {
+		s.Log.Warn("super_admin bootstrap could not check existing users", "error", e)
+		return
+	}
+	if exists {
+		return
+	}
+	var aid string
+	e = tx.QueryRow(context.Background(), `INSERT INTO accounts(name) VALUES($1) RETURNING id`, "Platform").Scan(&aid)
+	if e != nil {
+		s.Log.Warn("super_admin bootstrap could not create account", "error", e)
+		return
+	}
+	hash, e := bcrypt.GenerateFromPassword([]byte(s.C.SuperAdminPassword), bcrypt.DefaultCost)
+	if e != nil {
+		s.Log.Warn("super_admin bootstrap could not hash password", "error", e)
+		return
+	}
+	var uid string
+	e = tx.QueryRow(context.Background(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,'',$4,'super_admin') RETURNING id`, aid, s.C.SuperAdminEmail, s.C.SuperAdminName, string(hash)).Scan(&uid)
+	if e != nil {
+		s.Log.Warn("super_admin bootstrap could not create user", "error", e)
+		return
+	}
+	if e = tx.Commit(context.Background()); e != nil {
+		s.Log.Warn("super_admin bootstrap could not commit transaction", "error", e)
+		return
+	}
+	s.Log.Info("super_admin bootstrap created platform account", "user_id", uid)
 }

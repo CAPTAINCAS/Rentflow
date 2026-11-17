@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, ButtonHTMLAttributes } from "react";
 
 export function Loading({ label = "Loading account data" }: { label?: string }) {
   return <div className="state-line" role="status"><span className="spinner" aria-hidden="true" />{label}…</div>;
@@ -21,4 +21,17 @@ export function StatusPill({ value }: { value: unknown }) {
 
 export function Field({ label, error, children, hint }: { label: string; error?: string; children: ReactNode; hint?: string }) {
   return <label className="field"><span className="field-label">{label}</span>{children}{hint && <span className="field-hint">{hint}</span>}{error && <span className="field-error" role="alert">{error}</span>}</label>;
+}
+
+export function Button({ children, variant = "primary", ...props }: { children: ReactNode; variant?: "primary" | "outline" | "ghost" | "danger" } & ButtonHTMLAttributes<HTMLButtonElement>) {
+  const cls = variant === "primary" ? "button button-primary" : variant === "outline" ? "button button-outline" : variant === "danger" ? "button button-danger" : "button button-ghost";
+  return <button className={cls} {...props}>{children}</button>;
+}
+
+export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <section className={`panel ${className}`.trim()}>{children}</section>;
+}
+
+export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "good" | "warm" | "bad" | "neutral" }) {
+  return <span className={`status status-${tone}`}>{children}</span>;
 }

@@ -17,7 +17,8 @@ const defaultDevelopmentDatabaseURL = "postgres://rentflow:change-me@localhost:5
 const minJWTSecretLength = 32
 
 type Config struct {
-	Env, Port, DatabaseURL, WebOrigin, PublicAppURL, JWTSecret                                                                                                 string
+	Env, Port, DatabaseURL, WebOrigin, PublicAppURL, JWTSecret, SuperAdminEmail, SuperAdminName                                                                string
+	SuperAdminPassword                                                                                                                                         string
 	AccessTTL, RefreshTTL                                                                                                                                      time.Duration
 	CookieSecure                                                                                                                                               bool
 	CookieDomain                                                                                                                                               string
@@ -33,7 +34,7 @@ func Load() Config {
 	// /api/v1 to this process and page requests to the Next.js frontend). Set it
 	// only for the single-container gateway image, where the Go process also
 	// reverse-proxies page requests to the Next.js process.
-	c := Config{Env: env("APP_ENV", "development"), Port: env("PORT", "3000"), DatabaseURL: env("DATABASE_URL", defaultDevelopmentDatabaseURL), WebOrigin: strings.TrimRight(env("WEB_ORIGIN", ""), "/"), PublicAppURL: strings.TrimRight(env("PUBLIC_APP_URL", "http://127.0.0.1:3000"), "/"), JWTSecret: env("JWT_SECRET", ""), CookieDomain: env("COOKIE_DOMAIN", ""), DarajaBaseURL: mpesaBase(), DarajaKey: env("MPESA_CONSUMER_KEY", ""), DarajaSecret: env("MPESA_CONSUMER_SECRET", ""), DarajaShortCode: env("MPESA_SHORTCODE", ""), DarajaPasskey: env("MPESA_PASSKEY", ""), DarajaCallbackURL: env("MPESA_CALLBACK_URL", ""), DarajaValidationURL: env("MPESA_C2B_VALIDATION_URL", ""), DarajaConfirmationURL: env("MPESA_C2B_CONFIRMATION_URL", ""), DarajaCallbackToken: env("MPESA_CALLBACK_TOKEN", ""), SMSProvider: strings.ToLower(env("SMS_PROVIDER", "mock")), ATBaseURL: strings.TrimRight(env("AFRICASTALKING_BASE_URL", "https://api.sandbox.africastalking.com"), "/"), ATUsername: env("AFRICASTALKING_USERNAME", ""), ATAPIKey: env("AFRICASTALKING_API_KEY", ""), ATSenderID: env("AFRICASTALKING_SENDER_ID", "")}
+	c := Config{Env: env("APP_ENV", "development"), Port: env("PORT", "3000"), DatabaseURL: env("DATABASE_URL", defaultDevelopmentDatabaseURL), WebOrigin: strings.TrimRight(env("WEB_ORIGIN", ""), "/"), PublicAppURL: strings.TrimRight(env("PUBLIC_APP_URL", "http://127.0.0.1:3000"), "/"), JWTSecret: env("JWT_SECRET", ""), SuperAdminEmail: env("SUPER_ADMIN_EMAIL", ""), SuperAdminName: env("SUPER_ADMIN_NAME", ""), SuperAdminPassword: env("SUPER_ADMIN_PASSWORD", ""), CookieDomain: env("COOKIE_DOMAIN", ""), DarajaBaseURL: mpesaBase(), DarajaKey: env("MPESA_CONSUMER_KEY", ""), DarajaSecret: env("MPESA_CONSUMER_SECRET", ""), DarajaShortCode: env("MPESA_SHORTCODE", ""), DarajaPasskey: env("MPESA_PASSKEY", ""), DarajaCallbackURL: env("MPESA_CALLBACK_URL", ""), DarajaValidationURL: env("MPESA_C2B_VALIDATION_URL", ""), DarajaConfirmationURL: env("MPESA_C2B_CONFIRMATION_URL", ""), DarajaCallbackToken: env("MPESA_CALLBACK_TOKEN", ""), SMSProvider: strings.ToLower(env("SMS_PROVIDER", "mock")), ATBaseURL: strings.TrimRight(env("AFRICASTALKING_BASE_URL", "https://api.sandbox.africastalking.com"), "/"), ATUsername: env("AFRICASTALKING_USERNAME", ""), ATAPIKey: env("AFRICASTALKING_API_KEY", ""), ATSenderID: env("AFRICASTALKING_SENDER_ID", "")}
 	c.AccessTTL = duration("ACCESS_TOKEN_TTL", 15*time.Minute)
 	c.RefreshTTL = duration("REFRESH_TOKEN_TTL", 30*24*time.Hour)
 	c.CookieSecure = boolEnv("COOKIE_SECURE", true)
@@ -82,6 +83,14 @@ func (c Config) Validate() error {
 	}
 	if c.SMSProvider != "mock" && c.SMSProvider != "africastalking" {
 		problems = append(problems, "SMS_PROVIDER must be either mock or africastalking")
+	}
+	if c.SuperAdminEmail != "" || c.SuperAdminPassword != "" {
+		if !strings.Contains(c.SuperAdminEmail, "@") {
+			problems = append(problems, "SUPER_ADMIN_EMAIL must be a valid email address")
+		}
+		if len(c.SuperAdminPassword) < minJWTSecretLength {
+			problems = append(problems, fmt.Sprintf("SUPER_ADMIN_PASSWORD must be at least %d characters", minJWTSecretLength))
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))

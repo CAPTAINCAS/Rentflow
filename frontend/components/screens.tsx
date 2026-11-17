@@ -12,7 +12,7 @@ import { buildTenantLedger } from "@/lib/ledger";
 import { useSession } from "@/components/app-shell";
 import { EmptyState, ErrorState, Field, Loading, StatusPill } from "@/components/ui";
 
-type ScreenKind = "dashboard" | "properties" | "units" | "tenants" | "leases" | "ledger" | "payments" | "review" | "reports" | "tenant" | "tenantPayments";
+type ScreenKind = "dashboard" | "properties" | "units" | "tenants" | "leases" | "ledger" | "payments" | "review" | "reports" | "tenant" | "tenantPayments" | "maintenance" | "maintenanceDetail" | "maintenanceManage";
 type SelectSource = "properties" | "units" | "tenants";
 type FieldSpec = { name: string; label: string; type?: string; required?: boolean; hint?: string; minLength?: number; select?: SelectSource | "unitStatus"; editable?: boolean };
 type EntitySpec = { title: string; singular: string; endpoint: string; key: string; fields: FieldSpec[]; columns: string[]; editable: boolean; deletable: boolean };
@@ -45,7 +45,7 @@ const specs: Record<string, EntitySpec> = {
       { name: "email", label: "Email address", type: "email", required: true },
       { name: "phone", label: "Phone", type: "tel" },
       { name: "national_id", label: "National ID" },
-      { name: "password", label: "Initial tenant password", type: "password", required: true, minLength: 10, hint: "Creates a tenant login. Share the initial password securely." },
+      { name: "password", label: "Initial tenant password", type: "password", required: true, minLength: 12, hint: "12–128 characters. Creates a tenant login. Share the initial password securely." },
     ],
     columns: ["full_name", "phone", "email"], editable: true, deletable: true,
   },
@@ -306,6 +306,8 @@ function Reports() {
 function TenantHome({ paymentsOnly = false }: { paymentsOnly?: boolean }) {
   const invoices = useList("invoices", "/invoices", "invoices");
   const payments = useList("payments", "/payments", "payments");
+  const dashboard = useQuery({ queryKey: ["tenant-dashboard"], queryFn: () => api("/dashboard") });
+  const dash = asRecord(dashboard.data);
   const client = useQueryClient();
   const [form, setForm] = useState(false);
   const [message, setMessage] = useState("");
@@ -324,7 +326,15 @@ function TenantHome({ paymentsOnly = false }: { paymentsOnly?: boolean }) {
   const payableInvoices = (invoices.data ?? []).filter(invoice => Number(rowValue(invoice, "balance") ?? (Number(invoice.amount ?? 0) - Number(invoice.paid_amount ?? 0))) > 0);
   return <>
     <Header eyebrow="TENANT ACCOUNT" title={paymentsOnly ? "Your payments" : "Your rent account"} description={paymentsOnly ? "Your own payment history and receipts." : "Your balance, invoices and payment activity."} action={<button className="button button-primary" onClick={() => { setMessage(""); setForm(value => !value); }}>Pay by M-Pesa</button>} />
-    {!paymentsOnly && <div className="summary-band"><Metric label="Outstanding balance" value={invoices.isError ? "—" : formatMoney(outstanding)} note="Calculated from your invoice balances" /><Metric label="Invoices" value={invoices.data ? String(invoices.data.length) : "—"} /><Metric label="Payments recorded" value={payments.data ? String(payments.data.length) : "—"} /><Metric label="Account" value="Personal" note="Only your own records are shown" /></div>}
+    {!paymentsOnly && <Panel title="Your tenancy" aside={<span className="muted">Live API records</span>}>
+      {dashboard.isPending ? <Loading label="Loading tenancy" /> : dashboard.isError ? <QueryError error={dashboard.error} retry={() => dashboard.refetch()} /> : <div className="summary-band">
+        <Metric label="Property" value={stringValue(dash?.property_name) || "—"} note={stringValue(dash?.property_address)} />
+        <Metric label="Unit" value={stringValue(dash?.unit_code) || "—"} />
+        <Metric label="Monthly rent" value={dash?.rent_amount != null ? formatMoney(Number(dash.rent_amount)) : "—"} />
+        <Metric label="Lease status" value={stringValue(dash?.lease_status) || "—"} note={dash?.lease_end ? `Expires ${stringValue(dash.lease_end)}` : ""} />
+      </div>}
+    </Panel>}
+    {!paymentsOnly && <div className="summary-band"><Metric label="Outstanding balance" value={invoices.isError ? "—" : formatMoney(outstanding)} note="Calculated from your invoice balances" /><Metric label="Invoices" value={invoices.data ? String(invoices.data.length) : "—"} /><Metric label="Payments recorded" value={payments.data ? String(payments.data.length) : "—"} /><Metric label="Maintenance" value={dash?.maintenance ? String((dash.maintenance as any).pending ?? 0) : "—"} note="Pending requests" /></div>}
     {message && <div className={`notice ${stk.isError ? "notice-error" : "notice-success"}`} role="status">{message}</div>}
     {form && <Panel title="M-Pesa payment request" aside={<button className="text-button" onClick={() => setForm(false)}>Close</button>}>
       <form className="inline-form" onSubmit={event => { event.preventDefault(); stk.mutate(); }}>
@@ -339,6 +349,127 @@ function TenantHome({ paymentsOnly = false }: { paymentsOnly?: boolean }) {
     <div className="content-grid"><div><Panel title={paymentsOnly ? "Payment history" : "Invoices & balances"}>{paymentsOnly ? (payments.isPending ? <Loading label="Loading your payments" /> : payments.isError ? <QueryError error={payments.error} retry={() => payments.refetch()} /> : <Table rows={payments.data ?? []} columns={["payment_date", "amount", "method", "receipt_number", "status"]} emptyTitle="No payments recorded" emptyDetail="Your receipts and payment records will appear here when available." />) : (invoices.isPending ? <Loading label="Loading your invoices" /> : invoices.isError ? <QueryError error={invoices.error} retry={() => invoices.refetch()} /> : <Table rows={invoices.data ?? []} columns={["period", "due_date", "amount", "paid_amount", "balance", "status"]} emptyTitle="No invoices available" emptyDetail="Your invoice history will appear here when available from the API." />)}</Panel></div>
       {!paymentsOnly && <div><Panel title="Recent payments">{payments.isPending ? <Loading label="Loading your history" /> : payments.isError ? <QueryError error={payments.error} retry={() => payments.refetch()} /> : <Table rows={(payments.data ?? []).slice(0, 5)} columns={["payment_date", "amount", "receipt_number", "status"]} emptyTitle="No payment history" emptyDetail="Completed payments and receipts will show here." />}<div style={{ padding: "0 18px 17px" }}><Link className="text-link" href="/tenant/payments">Full payment history →</Link></div></Panel></div>}
     </div>
+  </>;
+}
+
+
+// ============================================================================
+// Maintenance Management Screens
+// ============================================================================
+
+const MAINTENANCE_CATEGORIES = [
+  { value: "plumbing", label: "Plumbing" },
+  { value: "electrical", label: "Electrical" },
+  { value: "security", label: "Security" },
+  { value: "general_repair", label: "General repair" },
+  { value: "other", label: "Other" },
+];
+
+const MAINTENANCE_STATUSES = [
+  { value: "submitted", label: "Submitted" },
+  { value: "under_review", label: "Under review" },
+  { value: "assigned", label: "Assigned" },
+  { value: "in_progress", label: "In progress" },
+  { value: "resolved", label: "Resolved" },
+  { value: "rejected", label: "Rejected" },
+];
+
+function statusLabel(value: unknown): string {
+  const found = MAINTENANCE_STATUSES.find(s => s.value === value);
+  return found ? found.label : stringValue(value);
+}
+
+function categoryLabel(value: unknown): string {
+  const found = MAINTENANCE_CATEGORIES.find(c => c.value === value);
+  return found ? found.label : stringValue(value);
+}
+
+function TenantMaintenance() {
+  const session = useSession();
+  const requests = useList("maintenance-requests", "/maintenance/requests", "maintenance-requests");
+  const client = useQueryClient();
+  const [submitting, setSubmitting] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
+  const [category, setCategory] = useState("plumbing");
+  const [description, setDescription] = useState("");
+  const [propertyId, setPropertyId] = useState("");
+  const [unitId, setUnitId] = useState("");
+  const [leaseId, setLeaseId] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [notice, setNotice] = useState("");
+
+  const properties = useList("maintenance-properties", "/properties", "properties");
+  const units = useList("maintenance-units", "/units", "units");
+
+  const submit = useMutation({
+    mutationFn: async () => {
+      const formData = new FormData();
+      formData.append("category", category);
+      formData.append("description", description);
+      formData.append("property_id", propertyId);
+      if (unitId) formData.append("unit_id", unitId);
+      if (leaseId) formData.append("lease_id", leaseId);
+      if (imageFile) formData.append("image", imageFile);
+      return api("/maintenance/requests", { method: "POST", body: formData });
+    },
+    onSuccess: async () => {
+      setNotice("Maintenance request submitted. You’ll receive a reference number.");
+      setFormOpen(false);
+      setCategory("plumbing"); setDescription(""); setPropertyId(""); setUnitId(""); setLeaseId(""); setImageFile(null);
+      await client.invalidateQueries({ queryKey: ["maintenance-requests"] });
+    },
+    onError: error => setNotice((error as Error).message),
+  });
+
+  if (session.isPending) return <Loading label="Checking your session" />;
+  if (session.isError) return <QueryError error={session.error} retry={() => session.refetch()} />;
+
+  return <>
+    <Header eyebrow="TENANT MAINTENANCE" title="Maintenance requests" description="Report an issue with your unit and track its progress." action={<button className="button button-primary" onClick={() => { setNotice(""); setFormOpen(value => !value); }}>＋ Report an issue</button>} />
+    {notice && <div className={`notice ${submitting ? "notice-error" : "notice-success"}`} role="status">{notice}</div>}
+    {formOpen && <Panel title="Submit a maintenance request" aside={<button className="text-button" onClick={() => setFormOpen(false)}>Close</button>}>
+      <form className="inline-form" onSubmit={event => { event.preventDefault(); setSubmitting(true); submit.mutate(); }}>
+        <div className="form-grid">
+          <Field label="Category" hint="What kind of issue is this?"><select required value={category} onChange={event => setCategory(event.target.value)}>{MAINTENANCE_CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}</select></Field>
+          <Field label="Description" hint="Describe the issue in detail."><textarea required rows={4} value={description} onChange={event => setDescription(event.target.value)} /></Field>
+          <Field label="Property" hint="Select the property this request is about."><select required value={propertyId} onChange={event => setPropertyId(event.target.value)}><option value="">Choose a property</option>{(properties.data ?? []).map(row => <option key={stringValue(row.id)} value={stringValue(row.id)}>{stringValue(row.name)}</option>)}</select></Field>
+          <Field label="Unit" hint="Optional: the specific unit."><select value={unitId} onChange={event => setUnitId(event.target.value)}><option value="">None specified</option>{(units.data ?? []).map(row => <option key={stringValue(row.id)} value={stringValue(row.id)}>{stringValue(row.code)}</option>)}</select></Field>
+          <Field label="Lease" hint="Optional: your active lease reference."><select value={leaseId} onChange={event => setLeaseId(event.target.value)}><option value="">None specified</option></select></Field>
+          <Field label="Photo (optional)" hint="JPEG, PNG or WebP, up to 5 MB."><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0] ?? null; setImageFile(file); }} /></Field>
+        </div>
+        {requests.isError && <QueryError error={requests.error} retry={() => requests.refetch()} />}
+        <div className="form-actions"><button type="button" className="button button-outline" onClick={() => setFormOpen(false)}>Cancel</button><button className="button button-primary" disabled={submit.isPending || !description || !propertyId}>{submit.isPending ? "Submitting…" : "Submit request"}</button></div>
+      </form>
+    </Panel>}
+    <Panel title="Your maintenance requests" aside={<span className="muted">{requests.data ? `${requests.data.length} requests` : "Live records"}</span>}>
+      {requests.isPending ? <Loading label="Loading your requests" /> : requests.isError ? <QueryError error={requests.error} retry={() => requests.refetch()} /> : <Table rows={requests.data ?? []} columns={["reference", "category", "status", "priority", "created_at"]} emptyTitle="No maintenance requests" emptyDetail="Submit your first maintenance request using the form above." actions={row => <Link className="row-action" href={`/maintenance/${stringValue(row.id)}`}>View</Link>} />}
+    </Panel>
+  </>;
+}
+
+function MaintenanceRequestDetail() {
+  // This is a placeholder; the actual detail page uses a route param handled
+  // by the Next.js page component which passes the request ID.
+  return <><Header eyebrow="MAINTENANCE" title="Request details" description="View the full history, comments and status of a maintenance request." /><Loading label="Loading request details" /></>;
+}
+
+function LandlordMaintenance() {
+  const requests = useList("landlord-maintenance", "/maintenance/requests", "maintenance-requests");
+  const client = useQueryClient();
+  const [notice, setNotice] = useState("");
+
+  const updateStatus = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) => api(`/maintenance/requests/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+    onSuccess: async () => { setNotice("Request status updated."); await client.invalidateQueries({ queryKey: ["landlord-maintenance"] }); },
+    onError: error => setNotice((error as Error).message),
+  });
+
+  return <>
+    <Header eyebrow="MAINTENANCE MANAGEMENT" title="All maintenance requests" description="View, assign and resolve maintenance requests for your properties." />
+    {notice && <div className="notice notice-success" role="status">{notice}</div>}
+    <Panel title="Maintenance requests" aside={<span className="muted">{requests.data ? `${requests.data.length} requests` : "Live records"}</span>}>
+      {requests.isPending ? <Loading label="Loading requests" /> : requests.isError ? <QueryError error={requests.error} retry={() => requests.refetch()} /> : <Table rows={requests.data ?? []} columns={["reference", "tenant_name", "property_name", "unit_code", "category", "status", "created_at"]} emptyTitle="No maintenance requests" emptyDetail="Tenant maintenance requests will appear here." actions={row => <div className="row-actions"><Link className="row-action" href={`/maintenance/${stringValue(row.id)}`}>View</Link>{stringValue(row.status) === "submitted" && <button className="row-action" onClick={() => { updateStatus.mutate({ id: stringValue(row.id), status: "under_review" }); }}>Review</button>}</div>} />}
+    </Panel>
   </>;
 }
 
@@ -359,6 +490,9 @@ export function Screen({ kind }: { kind: ScreenKind }) {
     case "payments": return <Payments />;
     case "review": return <Payments review />;
     case "reports": return <Reports />;
+    case "maintenance": return <TenantMaintenance />;
+    case "maintenanceDetail": return <MaintenanceRequestDetail />;
+    case "maintenanceManage": return <LandlordMaintenance />;
     default: return <TenantHome paymentsOnly={kind === "tenantPayments"} />;
   }
 }
