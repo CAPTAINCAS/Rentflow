@@ -8,11 +8,15 @@ import { Loading } from "@/components/ui";
 import type { ReactNode } from "react";
 
 const landlordLinks = [
-  ["/dashboard", "Overview", "⌂"], ["/properties", "Properties", "▤"], ["/units", "Units", "▦"],
-  ["/tenants", "Tenants", "♙"], ["/leases", "Leases", "▱"], ["/ledger", "Ledger", "≋"],
-  ["/payments", "Payments", "↗"], ["/payments/review", "Review queue", "!"], ["/reports", "Reports", "▥"],
+  ["/dashboard", "Overview", "⌂"],
+  ["/properties", "Properties", "▤"], ["/units", "Units", "▦"],
+  ["/tenants", "Tenants", "♙"], ["/leases", "Leases", "▱"],
+  ["/maintenance", "Maintenance", "🔧"],
+  ["/payments", "Payments", "↗"], ["/payments/review", "Review queue", "!"], ["/ledger", "Ledger", "≋"], ["/reports", "Reports", "▥"],
 ];
-const tenantLinks = [["/tenant", "My account", "⌂"], ["/tenant/payments", "Payments", "↗"]];
+const tenantLinks = [["/tenant", "My account", "⌂"], ["/maintenance", "Maintenance", "🔧"], ["/tenant/payments", "Payments", "↗"]];
+const superAdminLinks = [["/platform", "Platform", "⌂"], ["/platform/accounts", "Accounts", "♙"], ["/platform/subscriptions", "Subscriptions", "▦"], ["/platform/payments", "Payments", "↗"], ["/platform/revenue", "Revenue", "≋"], ["/platform/audit", "Audit", "▥"]];
+const agentLinks = [["/agent", "Overview", "⌂"], ["/properties", "Properties", "▤"], ["/units", "Units", "▦"], ["/tenants", "Tenants", "♙"], ["/leases", "Leases", "▱"], ["/maintenance", "Maintenance", "🔧"], ["/payments", "Payments", "↗"], ["/reports", "Reports", "▥"]];
 
 export function useSession() {
   return useQuery<JsonRecord | null>({
@@ -44,7 +48,11 @@ export function useSession() {
 
 function roleOf(session: JsonRecord | null | undefined) {
   const role = stringValue(session?.role ?? asRecord(session?.user)?.role).toLowerCase();
-  return role.includes("tenant") ? "tenant" : role ? "landlord" : "unknown";
+  if (role.includes("super_admin") || role.includes("superadmin")) return "super_admin";
+  if (role.includes("tenant")) return "tenant";
+  if (role.includes("agent")) return "agent";
+  if (role) return "landlord";
+  return "unknown";
 }
 
 function Brand() {
@@ -67,9 +75,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   if (!session) return <main className="logged-out-shell"><Brand /><div className="logged-out-copy"><p className="eyebrow">PROPERTY OPERATIONS · KENYA</p><h1>Every rent entry,<br />in its right place.</h1><p>Sign in to see live property, lease and payment records. Account data is never replaced with sample figures.</p><div className="row-actions"><Link className="button button-primary" href="/login">Sign in</Link><Link className="button button-outline" href="/register">Create account</Link></div></div><p className="logged-out-note">A clear record of what is owed, received and still needs attention.</p></main>;
   const role = roleOf(session);
   const isTenant = role === "tenant";
-  const allowed = isTenant ? pathname.startsWith("/tenant") || pathname === "/" : !pathname.startsWith("/tenant");
-  if (!allowed && pathname !== "/") return <main className="session-loading"><Brand /><h1>This view isn’t available for your account.</h1><p className="muted">You’re signed in with the {isTenant ? "tenant" : "landlord"} role.</p><Link className="button button-outline" href={isTenant ? "/tenant" : "/dashboard"}>Go to your account</Link></main>;
-  const links = isTenant ? tenantLinks : landlordLinks;
+  const isSuperAdmin = role === "super_admin";
+  const isAgent = role === "agent";
+  const allowed = isSuperAdmin ? pathname.startsWith("/platform") || pathname === "/" : isTenant ? pathname.startsWith("/tenant") || pathname === "/" : isAgent ? !pathname.startsWith("/tenant") && !pathname.startsWith("/platform") : !pathname.startsWith("/tenant") && !pathname.startsWith("/platform");
+  if (!allowed && pathname !== "/") return <main className="session-loading"><Brand /><h1>This view isn’t available for your account.</h1><p className="muted">You’re signed in with the {role} role.</p><Link className="button button-outline" href={isSuperAdmin ? "/platform" : isTenant ? "/tenant" : isAgent ? "/agent" : "/dashboard"}>Go to your account</Link></main>;
+  const links = isSuperAdmin ? superAdminLinks : isTenant ? tenantLinks : isAgent ? agentLinks : landlordLinks;
   const name = stringValue(session.name ?? session.full_name ?? session.email) || "Account";
   return <div className="app-frame">
     <aside className="side-rail"><Brand /><div className="rail-label">WORKSPACE</div><nav aria-label="Primary navigation">{links.map(([href, label, icon]) => <Link key={href} href={href} className={`nav-link ${pathname === href ? "active" : ""}`} aria-current={pathname === href ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{icon}</span><span>{label}</span></Link>)}</nav><div className="rail-bottom"><div className="account-chip"><span className="account-dot" /> <span className="account-name">{name}</span></div><button className="text-button" disabled={logout.isPending} onClick={() => logout.mutate()}>{logout.isPending ? "Signing out…" : "Sign out"}</button></div></aside>

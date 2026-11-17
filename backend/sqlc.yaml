@@ -5,6 +5,11 @@ sql:
       - "migrations/000001_init.up.sql"
       - "migrations/000002_account_integrity.up.sql"
       - "migrations/000003_resets_reminders.up.sql"
+      - "migrations/000004_super_admin_role.up.sql"
+      - "migrations/000005_subscriptions.up.sql"
+      - "migrations/000006_property_assignments.up.sql"
+      - "migrations/000007_maintenance.up.sql"
+      - "migrations/000008_audit_platform.up.sql"
     queries: "query/"
     gen:
       go:

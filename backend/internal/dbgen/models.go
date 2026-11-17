@@ -159,3 +159,77 @@ type User struct {
 	Role         string             `json:"role"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
+
+type PropertyAssignment struct {
+	ID         pgtype.UUID        `json:"id"`
+	AccountID  pgtype.UUID        `json:"account_id"`
+	AgentID    pgtype.UUID        `json:"agent_id"`
+	PropertyID pgtype.UUID        `json:"property_id"`
+	AssignedBy pgtype.UUID        `json:"assigned_by"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type MaintenanceRequest struct {
+	ID              pgtype.UUID        `json:"id"`
+	AccountID       pgtype.UUID        `json:"account_id"`
+	TenantID        pgtype.UUID        `json:"tenant_id"`
+	LeaseID         pgtype.UUID        `json:"lease_id"`
+	UnitID          pgtype.UUID        `json:"unit_id"`
+	PropertyID      pgtype.UUID        `json:"property_id"`
+	Reference       string             `json:"reference"`
+	Category        string             `json:"category"`
+	Description     string             `json:"description"`
+	ImageURL        string             `json:"image_url"`
+	Status          string             `json:"status"`
+	Priority        string             `json:"priority"`
+	AssignedTo      pgtype.UUID        `json:"assigned_to"`
+	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
+	ResolutionNotes string             `json:"resolution_notes"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type MaintenanceComment struct {
+	ID        pgtype.UUID        `json:"id"`
+	RequestID pgtype.UUID        `json:"request_id"`
+	AuthorID  pgtype.UUID        `json:"author_id"`
+	Body      string             `json:"body"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type AuditLog struct {
+	ID           pgtype.UUID        `json:"id"`
+	ActorID      pgtype.UUID        `json:"actor_id"`
+	ActorRole    string             `json:"actor_role"`
+	ActorEmail   string             `json:"actor_email"`
+	Action       string             `json:"action"`
+	ResourceType string             `json:"resource_type"`
+	ResourceID   string             `json:"resource_id"`
+	AccountID    pgtype.UUID        `json:"account_id"`
+	IPAddress    pgtype.Text        `json:"ip_address"`
+	UserAgent    string             `json:"user_agent"`
+	Metadata     []byte             `json:"metadata"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type PlatformSetting struct {
+	Key         string             `json:"key"`
+	Value       string             `json:"value"`
+	Description string             `json:"description"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	UpdatedBy   pgtype.UUID        `json:"updated_by"`
+}
+
+type SubscriptionPayment struct {
+	ID                pgtype.UUID        `json:"id"`
+	AccountID         pgtype.UUID        `json:"account_id"`
+	Amount            pgtype.Numeric     `json:"amount"`
+	Method            string             `json:"method"`
+	Status            string             `json:"status"`
+	ExternalRef       pgtype.Text        `json:"external_ref"`
+	Phone             string             `json:"phone"`
+	CheckoutRequestID pgtype.Text        `json:"checkout_request_id"`
+	TransactionDate   pgtype.Timestamptz `json:"transaction_date"`
+	Notes             string             `json:"notes"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}

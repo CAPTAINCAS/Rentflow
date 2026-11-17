@@ -101,6 +101,13 @@ func (s *Server) stkPush(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 404, "invoice_not_found", "invoice is not in your account")
 			return
 		}
+		if p.Role == "agent" {
+			ok, e2 := s.checkPropertyAccessByLease(r, leaseID, p.AccountID)
+			if e2 != nil || !ok {
+				writeErr(w, 403, "forbidden", "invoice not assigned to this agent")
+				return
+			}
+		}
 	} else if in.LeaseID != "" {
 		var e error
 		if p.Role == "tenant" {
@@ -114,6 +121,13 @@ func (s *Server) stkPush(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			writeErr(w, 404, "lease_not_found", "lease is not in your account")
 			return
+		}
+		if p.Role == "agent" {
+			ok, e2 := s.checkPropertyAccessByLease(r, leaseID, p.AccountID)
+			if e2 != nil || !ok {
+				writeErr(w, 403, "forbidden", "lease not assigned to this agent")
+				return
+			}
 		}
 	} else {
 		writeErr(w, 400, "invalid_request", "invoice_id is required")
@@ -421,17 +435,78 @@ func (s *Server) listPayments(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,coalesce((SELECT u.code FROM payment_allocations pa JOIN invoices i ON i.id=pa.invoice_id AND i.account_id=pa.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE pa.payment_id=p.id AND pa.account_id=p.account_id ORDER BY i.due_date DESC LIMIT 1),'') AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,coalesce(p.transaction_date,p.created_at) AS payment_date FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, p.AccountID)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load payments")
+			return
+		}
+		if len(propIDs) == 0 {
+			rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,coalesce((SELECT u.code FROM payment_allocations pa JOIN invoices i ON i.id=pa.invoice_id AND i.account_id=pa.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE pa.payment_id=p.id AND pa.account_id=p.account_id ORDER BY i.due_date DESC LIMIT 1),'') AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,coalesce(p.transaction_date,p.created_at) AS payment_date FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND false ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, a)
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+1)
+		args[0] = a
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+			args[i+1] = id
+		}
+		query := fmt.Sprintf(`SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,coalesce((SELECT u.code FROM payment_allocations pa JOIN invoices i ON i.id=pa.invoice_id AND i.account_id=pa.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE pa.payment_id=p.id AND pa.account_id=p.account_id ORDER BY i.due_date DESC LIMIT 1),'') AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,coalesce(p.transaction_date,p.created_at) AS payment_date FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND EXISTS(SELECT 1 FROM leases l2 JOIN units u2 ON u2.id=l2.unit_id WHERE l2.tenant_id=p.tenant_id AND l2.account_id=p.account_id AND u2.property_id IN (%s)) ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
+	rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,coalesce((SELECT u.code FROM payment_allocations pa JOIN invoices i ON i.id=pa.invoice_id AND i.account_id=pa.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE pa.payment_id=p.id AND pa.account_id=p.account_id ORDER BY i.due_date DESC LIMIT 1),'') AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,coalesce(p.transaction_date,p.created_at) AS payment_date FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, a)
 }
 func (s *Server) unmatched(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,'' AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,p.phone,coalesce(p.transaction_date,p.created_at) AS payment_date,p.notes FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND p.status='unmatched' ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, principal(r).AccountID)
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load unmatched payments")
+			return
+		}
+		if len(propIDs) == 0 {
+			rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,'' AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,p.phone,coalesce(p.transaction_date,p.created_at) AS payment_date,p.notes FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND false ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, a)
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+1)
+		args[0] = a
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+			args[i+1] = id
+		}
+		query := fmt.Sprintf(`SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,'' AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,p.phone,coalesce(p.transaction_date,p.created_at) AS payment_date,p.notes FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND p.status='unmatched' AND EXISTS(SELECT 1 FROM leases l2 JOIN units u2 ON u2.id=l2.unit_id WHERE l2.tenant_id=p.tenant_id AND l2.account_id=p.account_id AND u2.property_id IN (%s)) ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
+	rows(w, r, `SELECT p.id,p.tenant_id,coalesce(t.full_name,'') AS tenant_name,'' AS unit_code,p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,'') AS receipt_number,p.phone,coalesce(p.transaction_date,p.created_at) AS payment_date,p.notes FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND p.status='unmatched' ORDER BY coalesce(p.transaction_date,p.created_at) DESC`, a)
 }
 func (s *Server) assignPayment(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
+	}
+	p := principal(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccessByUnit(r, chi.URLParam(r, "id"), p.AccountID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "payment not assigned to this agent")
+			return
+		}
 	}
 	var in struct {
 		UnitID string `json:"unit_id"`
@@ -440,7 +515,11 @@ func (s *Server) assignPayment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "unit_id is required")
 		return
 	}
-	account := principal(r).AccountID
+	account, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
 		writeErr(w, 500, "database_error", "could not start transaction")
@@ -479,6 +558,7 @@ func (s *Server) collectionsCSV(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
 	month := r.URL.Query().Get("month")
 	if month == "" {
 		month = time.Now().In(time.FixedZone("EAT", 3*3600)).Format("2006-01")
@@ -487,7 +567,60 @@ func (s *Server) collectionsCSV(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_month", "month must use YYYY-MM")
 		return
 	}
-	account := principal(r).AccountID
+	account := p.AccountID
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not generate collections report")
+			return
+		}
+		if len(propIDs) == 0 {
+			w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+			w.Header().Set("Content-Disposition", "attachment; filename=collections-"+month+".csv")
+			cw := csv.NewWriter(w)
+			_ = cw.Write([]string{"date", "tenant", "amount_kes", "method", "mpesa_reference"})
+			cw.Flush()
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+2)
+		args[0] = account
+		args[1] = month + "-01"
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+3)
+			args[i+2] = id
+		}
+		query := fmt.Sprintf(`SELECT to_char(COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi','YYYY-MM-DD'),coalesce(t.full_name,''),p.amount::text,p.method,coalesce(p.external_ref,'') FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND p.status='completed' AND (COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date >= $2::date AND (COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date < ($2::date+interval '1 month') AND EXISTS(SELECT 1 FROM leases l2 JOIN units u2 ON u2.id=l2.unit_id WHERE l2.tenant_id=p.tenant_id AND l2.account_id=p.account_id AND u2.property_id IN (%s)) ORDER BY COALESCE(p.transaction_date,p.created_at)`, strings.Join(placeholders, ","))
+		rs, err := s.DB.Query(r.Context(), query, args...)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "database_error", "could not generate report")
+			return
+		}
+		defer rs.Close()
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=collections-"+month+".csv")
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"date", "tenant", "amount_kes", "method", "mpesa_reference"})
+		for rs.Next() {
+			var date, tenant, amount, method, ref string
+			if err = rs.Scan(&date, &tenant, &amount, &method, &ref); err != nil {
+				s.Log.Error("collections export row failed", "error", err)
+				break
+			}
+			if err = cw.Write([]string{date, tenant, amount, method, ref}); err != nil {
+				s.Log.Error("collections export write failed", "error", err)
+				break
+			}
+		}
+		if err = rs.Err(); err != nil {
+			s.Log.Error("collections export query failed", "error", err)
+		}
+		cw.Flush()
+		if err = cw.Error(); err != nil {
+			s.Log.Error("collections export flush failed", "error", err)
+		}
+		return
+	}
 	rs, err := s.DB.Query(r.Context(), `SELECT to_char(COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi','YYYY-MM-DD'),coalesce(t.full_name,''),p.amount::text,p.method,coalesce(p.external_ref,'') FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.account_id=$1 AND p.status='completed' AND (COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date >= $2::date AND (COALESCE(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date < ($2::date+interval '1 month') ORDER BY COALESCE(p.transaction_date,p.created_at)`, account, month+"-01")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "database_error", "could not generate report")
@@ -522,7 +655,60 @@ func (s *Server) arrearsCSV(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	account := principal(r).AccountID
+	p := principal(r)
+	account := p.AccountID
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not generate arrears report")
+			return
+		}
+		if len(propIDs) == 0 {
+			w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+			w.Header().Set("Content-Disposition", "attachment; filename=arrears.csv")
+			cw := csv.NewWriter(w)
+			_ = cw.Write([]string{"tenant", "phone", "unit", "period", "due_date", "amount_kes", "paid_kes", "balance_kes", "days_overdue"})
+			cw.Flush()
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+1)
+		args[0] = account
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+			args[i+1] = id
+		}
+		query := fmt.Sprintf(`SELECT t.full_name,t.phone,u.code,i.period::text,i.due_date::text,i.amount::text,i.paid_amount::text,(i.amount-i.paid_amount)::text,(current_date-i.due_date)::text FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE i.account_id=$1 AND i.due_date<current_date AND i.paid_amount<i.amount AND u.property_id IN (%s) ORDER BY i.due_date`, strings.Join(placeholders, ","))
+		rs, err := s.DB.Query(r.Context(), query, args...)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "database_error", "could not generate report")
+			return
+		}
+		defer rs.Close()
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=arrears.csv")
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"tenant", "phone", "unit", "period", "due_date", "amount_kes", "paid_kes", "balance_kes", "days_overdue"})
+		for rs.Next() {
+			var tenant, phone, unit, period, due, amount, paid, balance, days string
+			if err = rs.Scan(&tenant, &phone, &unit, &period, &due, &amount, &paid, &balance, &days); err != nil {
+				s.Log.Error("arrears export row failed", "error", err)
+				break
+			}
+			if err = cw.Write([]string{tenant, phone, unit, period, due, amount, paid, balance, days}); err != nil {
+				s.Log.Error("arrears export write failed", "error", err)
+				break
+			}
+		}
+		if err = rs.Err(); err != nil {
+			s.Log.Error("arrears export query failed", "error", err)
+		}
+		cw.Flush()
+		if err = cw.Error(); err != nil {
+			s.Log.Error("arrears export flush failed", "error", err)
+		}
+		return
+	}
 	rs, err := s.DB.Query(r.Context(), `SELECT t.full_name,t.phone,u.code,i.period::text,i.due_date::text,i.amount::text,i.paid_amount::text,(i.amount-i.paid_amount)::text,(current_date-i.due_date)::text FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE i.account_id=$1 AND i.due_date<current_date AND i.paid_amount<i.amount ORDER BY i.due_date`, account)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "database_error", "could not generate report")
@@ -593,6 +779,7 @@ func (s *Server) recordPayment(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
 	var in struct {
 		TenantID string  `json:"tenant_id"`
 		Amount   float64 `json:"amount"`
@@ -603,6 +790,13 @@ func (s *Server) recordPayment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "tenant_id and positive amount are required")
 		return
 	}
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccessByTenant(r, in.TenantID, p.AccountID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "tenant not assigned to this agent")
+			return
+		}
+	}
 	in.Method = strings.ToLower(in.Method)
 	if in.Method == "" {
 		in.Method = "cash"
@@ -611,7 +805,11 @@ func (s *Server) recordPayment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_method", "manual payment method must be cash, bank, or other")
 		return
 	}
-	account := principal(r).AccountID
+	account, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
 		writeErr(w, 500, "database_error", "could not start transaction")

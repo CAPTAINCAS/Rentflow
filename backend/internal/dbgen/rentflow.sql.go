@@ -221,3 +221,1027 @@ func (q *Queries) ListUnits(ctx context.Context, accountID pgtype.UUID) ([]Unit,
 	}
 	return items, nil
 }
+
+const createPasswordReset = `-- name: CreatePasswordReset :exec
+INSERT INTO password_resets(user_id, token_hash, expires_at, created_at)
+VALUES ($1, $2, $3, now())
+`
+
+type CreatePasswordResetParams struct {
+	UserID    pgtype.UUID        `json:"user_id"`
+	TokenHash string             `json:"token_hash"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreatePasswordReset(ctx context.Context, arg CreatePasswordResetParams) error {
+	_, err := q.db.Exec(ctx, createPasswordReset,
+		arg.UserID,
+		arg.TokenHash,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const getPasswordResetByToken = `-- name: GetPasswordResetByToken :one
+SELECT id, user_id, expires_at, used_at, created_at
+FROM password_resets
+WHERE token_hash = $1
+`
+
+type GetPasswordResetByTokenParams struct {
+	TokenHash string `json:"token_hash"`
+}
+
+func (q *Queries) GetPasswordResetByToken(ctx context.Context, tokenHash string) (PasswordReset, error) {
+	row := q.db.QueryRow(ctx, getPasswordResetByToken, tokenHash)
+	var i PasswordReset
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const markPasswordResetUsed = `-- name: MarkPasswordResetUsed :exec
+UPDATE password_resets
+SET used_at = now()
+WHERE id = $1 AND used_at IS NULL
+`
+
+type MarkPasswordResetUsedParams struct {
+	ID pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) MarkPasswordResetUsed(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markPasswordResetUsed, id)
+	return err
+}
+
+const listPasswordResetsByUser = `-- name: ListPasswordResetsByUser :many
+SELECT id, user_id, expires_at, used_at, created_at
+FROM password_resets
+WHERE user_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListPasswordResetsByUserParams struct {
+	UserID pgtype.UUID `json:"user_id"`
+	Limit  int32       `json:"limit"`
+	Offset int32       `json:"offset"`
+}
+
+func (q *Queries) ListPasswordResetsByUser(ctx context.Context, arg ListPasswordResetsByUserParams) ([]PasswordReset, error) {
+	rows, err := q.db.Query(ctx, listPasswordResetsByUser,
+		arg.UserID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PasswordReset{}
+	for rows.Next() {
+		var i PasswordReset
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const createBillingNotification = `-- name: CreateBillingNotification :exec
+INSERT INTO billing_notifications(
+  account_id, tenant_id, lease_id, invoice_id, period,
+  kind, scheduled_for, status, attempts, last_error, created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, '', now())
+`
+
+type CreateBillingNotificationParams struct {
+	AccountID    pgtype.UUID `json:"account_id"`
+	TenantID     pgtype.UUID `json:"tenant_id"`
+	LeaseID      pgtype.UUID `json:"lease_id"`
+	InvoiceID    pgtype.UUID `json:"invoice_id"`
+	Period       pgtype.Date `json:"period"`
+	Kind         string      `json:"kind"`
+	ScheduledFor pgtype.Date `json:"scheduled_for"`
+}
+
+func (q *Queries) CreateBillingNotification(ctx context.Context, arg CreateBillingNotificationParams) error {
+	_, err := q.db.Exec(ctx, createBillingNotification,
+		arg.AccountID,
+		arg.TenantID,
+		arg.LeaseID,
+		arg.InvoiceID,
+		arg.Period,
+		arg.Kind,
+		arg.ScheduledFor,
+	)
+	return err
+}
+
+const listPendingBillingNotifications = `-- name: ListPendingBillingNotifications :many
+SELECT id, account_id, tenant_id, lease_id, invoice_id, period,
+       kind, scheduled_for, status, attempts, last_error, created_at, sent_at
+FROM billing_notifications
+WHERE status = 'pending'
+  AND account_id = $1
+ORDER BY scheduled_for ASC
+LIMIT $2 OFFSET $3
+`
+
+type ListPendingBillingNotificationsParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListPendingBillingNotifications(ctx context.Context, arg ListPendingBillingNotificationsParams) ([]BillingNotification, error) {
+	rows, err := q.db.Query(ctx, listPendingBillingNotifications,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BillingNotification{}
+	for rows.Next() {
+		var i BillingNotification
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.TenantID,
+			&i.LeaseID,
+			&i.InvoiceID,
+			&i.Period,
+			&i.Kind,
+			&i.ScheduledFor,
+			&i.Status,
+			&i.Attempts,
+			&i.LastError,
+			&i.CreatedAt,
+			&i.SentAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markBillingNotificationSent = `-- name: MarkBillingNotificationSent :exec
+UPDATE billing_notifications
+SET status = 'sent', sent_at = now()
+WHERE id = $1 AND account_id = $2
+`
+
+type MarkBillingNotificationSentParams struct {
+	ID        pgtype.UUID `json:"id"`
+	AccountID pgtype.UUID `json:"account_id"`
+}
+
+func (q *Queries) MarkBillingNotificationSent(ctx context.Context, arg MarkBillingNotificationSentParams) error {
+	_, err := q.db.Exec(ctx, markBillingNotificationSent,
+		arg.ID,
+		arg.AccountID,
+	)
+	return err
+}
+
+const markBillingNotificationFailed = `-- name: MarkBillingNotificationFailed :exec
+UPDATE billing_notifications
+SET status = 'failed', attempts = attempts + 1, last_error = $3
+WHERE id = $1 AND account_id = $2
+`
+
+type MarkBillingNotificationFailedParams struct {
+	ID        pgtype.UUID `json:"id"`
+	AccountID pgtype.UUID `json:"account_id"`
+	LastError string      `json:"last_error"`
+}
+
+func (q *Queries) MarkBillingNotificationFailed(ctx context.Context, arg MarkBillingNotificationFailedParams) error {
+	_, err := q.db.Exec(ctx, markBillingNotificationFailed,
+		arg.ID,
+		arg.AccountID,
+		arg.LastError,
+	)
+	return err
+}
+
+const createSubscriptionPayment = `-- name: CreateSubscriptionPayment :exec
+INSERT INTO subscription_payments(
+  account_id, amount, method, status, external_ref,
+  phone, checkout_request_id, transaction_date, notes, created_at
+)
+VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, now())
+`
+
+type CreateSubscriptionPaymentParams struct {
+	AccountID         pgtype.UUID        `json:"account_id"`
+	Amount            pgtype.Numeric     `json:"amount"`
+	Method            string             `json:"method"`
+	ExternalRef       pgtype.Text        `json:"external_ref"`
+	Phone             string             `json:"phone"`
+	CheckoutRequestID pgtype.Text        `json:"checkout_request_id"`
+	TransactionDate   pgtype.Timestamptz `json:"transaction_date"`
+	Notes             string             `json:"notes"`
+}
+
+func (q *Queries) CreateSubscriptionPayment(ctx context.Context, arg CreateSubscriptionPaymentParams) error {
+	_, err := q.db.Exec(ctx, createSubscriptionPayment,
+		arg.AccountID,
+		arg.Amount,
+		arg.Method,
+		arg.ExternalRef,
+		arg.Phone,
+		arg.CheckoutRequestID,
+		arg.TransactionDate,
+		arg.Notes,
+	)
+	return err
+}
+
+const getSubscriptionPaymentByCheckoutID = `-- name: GetSubscriptionPaymentByCheckoutID :one
+SELECT id, account_id, amount, method, status, external_ref,
+       phone, checkout_request_id, transaction_date, notes, created_at
+FROM subscription_payments
+WHERE checkout_request_id = $1
+`
+
+type GetSubscriptionPaymentByCheckoutIDParams struct {
+	CheckoutRequestID string `json:"checkout_request_id"`
+}
+
+func (q *Queries) GetSubscriptionPaymentByCheckoutID(ctx context.Context, checkoutRequestID string) (SubscriptionPayment, error) {
+	row := q.db.QueryRow(ctx, getSubscriptionPaymentByCheckoutID, checkoutRequestID)
+	var i SubscriptionPayment
+	err := row.Scan(
+		&i.ID,
+		&i.AccountID,
+		&i.Amount,
+		&i.Method,
+		&i.Status,
+		&i.ExternalRef,
+		&i.Phone,
+		&i.CheckoutRequestID,
+		&i.TransactionDate,
+		&i.Notes,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listSubscriptionPaymentsByAccount = `-- name: ListSubscriptionPaymentsByAccount :many
+SELECT id, account_id, amount, method, status, external_ref,
+       phone, checkout_request_id, transaction_date, notes, created_at
+FROM subscription_payments
+WHERE account_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListSubscriptionPaymentsByAccountParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListSubscriptionPaymentsByAccount(ctx context.Context, arg ListSubscriptionPaymentsByAccountParams) ([]SubscriptionPayment, error) {
+	rows, err := q.db.Query(ctx, listSubscriptionPaymentsByAccount,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SubscriptionPayment{}
+	for rows.Next() {
+		var i SubscriptionPayment
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.Amount,
+			&i.Method,
+			&i.Status,
+			&i.ExternalRef,
+			&i.Phone,
+			&i.CheckoutRequestID,
+			&i.TransactionDate,
+			&i.Notes,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateSubscriptionPaymentStatus = `-- name: UpdateSubscriptionPaymentStatus :exec
+UPDATE subscription_payments
+SET status = $2, transaction_date = $3
+WHERE id = $1 AND account_id = $4
+`
+
+type UpdateSubscriptionPaymentStatusParams struct {
+	ID              pgtype.UUID        `json:"id"`
+	Status          string             `json:"status"`
+	TransactionDate pgtype.Timestamptz `json:"transaction_date"`
+	AccountID       pgtype.UUID        `json:"account_id"`
+}
+
+func (q *Queries) UpdateSubscriptionPaymentStatus(ctx context.Context, arg UpdateSubscriptionPaymentStatusParams) error {
+	_, err := q.db.Exec(ctx, updateSubscriptionPaymentStatus,
+		arg.ID,
+		arg.Status,
+		arg.TransactionDate,
+		arg.AccountID,
+	)
+	return err
+}
+
+const createPropertyAssignment = `-- name: CreatePropertyAssignment :exec
+INSERT INTO property_assignments(
+  account_id, agent_id, property_id, assigned_by, created_at
+)
+VALUES ($1, $2, $3, $4, now())
+`
+
+type CreatePropertyAssignmentParams struct {
+	AccountID  pgtype.UUID `json:"account_id"`
+	AgentID    pgtype.UUID `json:"agent_id"`
+	PropertyID pgtype.UUID `json:"property_id"`
+	AssignedBy pgtype.UUID `json:"assigned_by"`
+}
+
+func (q *Queries) CreatePropertyAssignment(ctx context.Context, arg CreatePropertyAssignmentParams) error {
+	_, err := q.db.Exec(ctx, createPropertyAssignment,
+		arg.AccountID,
+		arg.AgentID,
+		arg.PropertyID,
+		arg.AssignedBy,
+	)
+	return err
+}
+
+const listPropertyAssignmentsByAgent = `-- name: ListPropertyAssignmentsByAgent :many
+SELECT id, account_id, agent_id, property_id, assigned_by, created_at
+FROM property_assignments
+WHERE agent_id = $1 AND account_id = $2
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListPropertyAssignmentsByAgentParams struct {
+	AgentID   pgtype.UUID `json:"agent_id"`
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListPropertyAssignmentsByAgent(ctx context.Context, arg ListPropertyAssignmentsByAgentParams) ([]PropertyAssignment, error) {
+	rows, err := q.db.Query(ctx, listPropertyAssignmentsByAgent,
+		arg.AgentID,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PropertyAssignment{}
+	for rows.Next() {
+		var i PropertyAssignment
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.AgentID,
+			&i.PropertyID,
+			&i.AssignedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPropertyAssignmentsByProperty = `-- name: ListPropertyAssignmentsByProperty :many
+SELECT id, account_id, agent_id, property_id, assigned_by, created_at
+FROM property_assignments
+WHERE property_id = $1 AND account_id = $2
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListPropertyAssignmentsByPropertyParams struct {
+	PropertyID pgtype.UUID `json:"property_id"`
+	AccountID  pgtype.UUID `json:"account_id"`
+	Limit      int32       `json:"limit"`
+	Offset     int32       `json:"offset"`
+}
+
+func (q *Queries) ListPropertyAssignmentsByProperty(ctx context.Context, arg ListPropertyAssignmentsByPropertyParams) ([]PropertyAssignment, error) {
+	rows, err := q.db.Query(ctx, listPropertyAssignmentsByProperty,
+		arg.PropertyID,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PropertyAssignment{}
+	for rows.Next() {
+		var i PropertyAssignment
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.AgentID,
+			&i.PropertyID,
+			&i.AssignedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deletePropertyAssignment = `-- name: DeletePropertyAssignment :exec
+DELETE FROM property_assignments
+WHERE agent_id = $1 AND property_id = $2 AND account_id = $3
+`
+
+type DeletePropertyAssignmentParams struct {
+	AgentID    pgtype.UUID `json:"agent_id"`
+	PropertyID pgtype.UUID `json:"property_id"`
+	AccountID  pgtype.UUID `json:"account_id"`
+}
+
+func (q *Queries) DeletePropertyAssignment(ctx context.Context, arg DeletePropertyAssignmentParams) error {
+	_, err := q.db.Exec(ctx, deletePropertyAssignment,
+		arg.AgentID,
+		arg.PropertyID,
+		arg.AccountID,
+	)
+	return err
+}
+
+const createMaintenanceRequest = `-- name: CreateMaintenanceRequest :exec
+INSERT INTO maintenance_requests(
+  account_id, tenant_id, lease_id, unit_id, property_id,
+  reference, category, description, image_url, status, priority,
+  assigned_to, created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open', $10, $11, now(), now())
+`
+
+type CreateMaintenanceRequestParams struct {
+	AccountID   pgtype.UUID `json:"account_id"`
+	TenantID    pgtype.UUID `json:"tenant_id"`
+	LeaseID     pgtype.UUID `json:"lease_id"`
+	UnitID      pgtype.UUID `json:"unit_id"`
+	PropertyID  pgtype.UUID `json:"property_id"`
+	Reference   string      `json:"reference"`
+	Category    string      `json:"category"`
+	Description string      `json:"description"`
+	ImageURL    string      `json:"image_url"`
+	Priority    string      `json:"priority"`
+	AssignedTo  pgtype.UUID `json:"assigned_to"`
+}
+
+func (q *Queries) CreateMaintenanceRequest(ctx context.Context, arg CreateMaintenanceRequestParams) error {
+	_, err := q.db.Exec(ctx, createMaintenanceRequest,
+		arg.AccountID,
+		arg.TenantID,
+		arg.LeaseID,
+		arg.UnitID,
+		arg.PropertyID,
+		arg.Reference,
+		arg.Category,
+		arg.Description,
+		arg.ImageURL,
+		arg.Priority,
+		arg.AssignedTo,
+	)
+	return err
+}
+
+const getMaintenanceRequestByReference = `-- name: GetMaintenanceRequestByReference :one
+SELECT id, account_id, tenant_id, lease_id, unit_id, property_id,
+       reference, category, description, image_url, status, priority,
+       assigned_to, resolved_at, resolution_notes, created_at, updated_at
+FROM maintenance_requests
+WHERE reference = $1 AND account_id = $2
+`
+
+type GetMaintenanceRequestByReferenceParams struct {
+	Reference string      `json:"reference"`
+	AccountID pgtype.UUID `json:"account_id"`
+}
+
+func (q *Queries) GetMaintenanceRequestByReference(ctx context.Context, arg GetMaintenanceRequestByReferenceParams) (MaintenanceRequest, error) {
+	row := q.db.QueryRow(ctx, getMaintenanceRequestByReference, arg.Reference, arg.AccountID)
+	var i MaintenanceRequest
+	err := row.Scan(
+		&i.ID,
+		&i.AccountID,
+		&i.TenantID,
+		&i.LeaseID,
+		&i.UnitID,
+		&i.PropertyID,
+		&i.Reference,
+		&i.Category,
+		&i.Description,
+		&i.ImageURL,
+		&i.Status,
+		&i.Priority,
+		&i.AssignedTo,
+		&i.ResolvedAt,
+		&i.ResolutionNotes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listMaintenanceRequestsByTenant = `-- name: ListMaintenanceRequestsByTenant :many
+SELECT id, account_id, tenant_id, lease_id, unit_id, property_id,
+       reference, category, description, image_url, status, priority,
+       assigned_to, resolved_at, resolution_notes, created_at, updated_at
+FROM maintenance_requests
+WHERE tenant_id = $1 AND account_id = $2
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListMaintenanceRequestsByTenantParams struct {
+	TenantID  pgtype.UUID `json:"tenant_id"`
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListMaintenanceRequestsByTenant(ctx context.Context, arg ListMaintenanceRequestsByTenantParams) ([]MaintenanceRequest, error) {
+	rows, err := q.db.Query(ctx, listMaintenanceRequestsByTenant,
+		arg.TenantID,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaintenanceRequest{}
+	for rows.Next() {
+		var i MaintenanceRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.TenantID,
+			&i.LeaseID,
+			&i.UnitID,
+			&i.PropertyID,
+			&i.Reference,
+			&i.Category,
+			&i.Description,
+			&i.ImageURL,
+			&i.Status,
+			&i.Priority,
+			&i.AssignedTo,
+			&i.ResolvedAt,
+			&i.ResolutionNotes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMaintenanceRequestsByAccount = `-- name: ListMaintenanceRequestsByAccount :many
+SELECT id, account_id, tenant_id, lease_id, unit_id, property_id,
+       reference, category, description, image_url, status, priority,
+       assigned_to, resolved_at, resolution_notes, created_at, updated_at
+FROM maintenance_requests
+WHERE account_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListMaintenanceRequestsByAccountParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListMaintenanceRequestsByAccount(ctx context.Context, arg ListMaintenanceRequestsByAccountParams) ([]MaintenanceRequest, error) {
+	rows, err := q.db.Query(ctx, listMaintenanceRequestsByAccount,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaintenanceRequest{}
+	for rows.Next() {
+		var i MaintenanceRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.TenantID,
+			&i.LeaseID,
+			&i.UnitID,
+			&i.PropertyID,
+			&i.Reference,
+			&i.Category,
+			&i.Description,
+			&i.ImageURL,
+			&i.Status,
+			&i.Priority,
+			&i.AssignedTo,
+			&i.ResolvedAt,
+			&i.ResolutionNotes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMaintenanceRequestsByStatus = `-- name: ListMaintenanceRequestsByStatus :many
+SELECT id, account_id, tenant_id, lease_id, unit_id, property_id,
+       reference, category, description, image_url, status, priority,
+       assigned_to, resolved_at, resolution_notes, created_at, updated_at
+FROM maintenance_requests
+WHERE account_id = $1 AND status = $2
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListMaintenanceRequestsByStatusParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	Status    string      `json:"status"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListMaintenanceRequestsByStatus(ctx context.Context, arg ListMaintenanceRequestsByStatusParams) ([]MaintenanceRequest, error) {
+	rows, err := q.db.Query(ctx, listMaintenanceRequestsByStatus,
+		arg.AccountID,
+		arg.Status,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaintenanceRequest{}
+	for rows.Next() {
+		var i MaintenanceRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.TenantID,
+			&i.LeaseID,
+			&i.UnitID,
+			&i.PropertyID,
+			&i.Reference,
+			&i.Category,
+			&i.Description,
+			&i.ImageURL,
+			&i.Status,
+			&i.Priority,
+			&i.AssignedTo,
+			&i.ResolvedAt,
+			&i.ResolutionNotes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateMaintenanceRequestStatus = `-- name: UpdateMaintenanceRequestStatus :exec
+UPDATE maintenance_requests
+SET status = $2, updated_at = now()
+WHERE id = $1 AND account_id = $3
+`
+
+type UpdateMaintenanceRequestStatusParams struct {
+	ID        pgtype.UUID `json:"id"`
+	Status    string      `json:"status"`
+	AccountID pgtype.UUID `json:"account_id"`
+}
+
+func (q *Queries) UpdateMaintenanceRequestStatus(ctx context.Context, arg UpdateMaintenanceRequestStatusParams) error {
+	_, err := q.db.Exec(ctx, updateMaintenanceRequestStatus,
+		arg.ID,
+		arg.Status,
+		arg.AccountID,
+	)
+	return err
+}
+
+const assignMaintenanceRequest = `-- name: AssignMaintenanceRequest :exec
+UPDATE maintenance_requests
+SET assigned_to = $2, updated_at = now()
+WHERE id = $1 AND account_id = $3
+`
+
+type AssignMaintenanceRequestParams struct {
+	ID         pgtype.UUID `json:"id"`
+	AssignedTo pgtype.UUID `json:"assigned_to"`
+	AccountID  pgtype.UUID `json:"account_id"`
+}
+
+func (q *Queries) AssignMaintenanceRequest(ctx context.Context, arg AssignMaintenanceRequestParams) error {
+	_, err := q.db.Exec(ctx, assignMaintenanceRequest,
+		arg.ID,
+		arg.AssignedTo,
+		arg.AccountID,
+	)
+	return err
+}
+
+const createMaintenanceComment = `-- name: CreateMaintenanceComment :exec
+INSERT INTO maintenance_comments(
+  request_id, author_id, body, created_at
+)
+VALUES ($1, $2, $3, now())
+`
+
+type CreateMaintenanceCommentParams struct {
+	RequestID pgtype.UUID `json:"request_id"`
+	AuthorID  pgtype.UUID `json:"author_id"`
+	Body      string      `json:"body"`
+}
+
+func (q *Queries) CreateMaintenanceComment(ctx context.Context, arg CreateMaintenanceCommentParams) error {
+	_, err := q.db.Exec(ctx, createMaintenanceComment,
+		arg.RequestID,
+		arg.AuthorID,
+		arg.Body,
+	)
+	return err
+}
+
+const listMaintenanceCommentsByRequest = `-- name: ListMaintenanceCommentsByRequest :many
+SELECT id, request_id, author_id, body, created_at
+FROM maintenance_comments
+WHERE request_id = $1
+ORDER BY created_at ASC
+`
+
+type ListMaintenanceCommentsByRequestParams struct {
+	RequestID pgtype.UUID `json:"request_id"`
+}
+
+func (q *Queries) ListMaintenanceCommentsByRequest(ctx context.Context, requestID pgtype.UUID) ([]MaintenanceComment, error) {
+	rows, err := q.db.Query(ctx, listMaintenanceCommentsByRequest, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaintenanceComment{}
+	for rows.Next() {
+		var i MaintenanceComment
+		if err := rows.Scan(
+			&i.ID,
+			&i.RequestID,
+			&i.AuthorID,
+			&i.Body,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const createAuditLog = `-- name: CreateAuditLog :exec
+INSERT INTO audit_logs(
+  actor_id, actor_role, actor_email, action, resource_type,
+  resource_id, account_id, ip_address, user_agent, metadata, created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+`
+
+type CreateAuditLogParams struct {
+	ActorID      pgtype.UUID `json:"actor_id"`
+	ActorRole    string      `json:"actor_role"`
+	ActorEmail   string      `json:"actor_email"`
+	Action       string      `json:"action"`
+	ResourceType string      `json:"resource_type"`
+	ResourceID   string      `json:"resource_id"`
+	AccountID    pgtype.UUID `json:"account_id"`
+	IPAddress    pgtype.Text `json:"ip_address"`
+	UserAgent    string      `json:"user_agent"`
+	Metadata     []byte      `json:"metadata"`
+}
+
+func (q *Queries) CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) error {
+	_, err := q.db.Exec(ctx, createAuditLog,
+		arg.ActorID,
+		arg.ActorRole,
+		arg.ActorEmail,
+		arg.Action,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.AccountID,
+		arg.IPAddress,
+		arg.UserAgent,
+		arg.Metadata,
+	)
+	return err
+}
+
+const listAuditLogsByAccount = `-- name: ListAuditLogsByAccount :many
+SELECT id, actor_id, actor_role, actor_email, action, resource_type,
+       resource_id, account_id, ip_address, user_agent, metadata, created_at
+FROM audit_logs
+WHERE account_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListAuditLogsByAccountParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+}
+
+func (q *Queries) ListAuditLogsByAccount(ctx context.Context, arg ListAuditLogsByAccountParams) ([]AuditLog, error) {
+	rows, err := q.db.Query(ctx, listAuditLogsByAccount,
+		arg.AccountID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditLog{}
+	for rows.Next() {
+		var i AuditLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActorID,
+			&i.ActorRole,
+			&i.ActorEmail,
+			&i.Action,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.AccountID,
+			&i.IPAddress,
+			&i.UserAgent,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getPlatformSetting = `-- name: GetPlatformSetting :one
+SELECT key, value, description, updated_at, updated_by
+FROM platform_settings
+WHERE key = $1
+`
+
+type GetPlatformSettingParams struct {
+	Key string `json:"key"`
+}
+
+func (q *Queries) GetPlatformSetting(ctx context.Context, key string) (PlatformSetting, error) {
+	row := q.db.QueryRow(ctx, getPlatformSetting, key)
+	var i PlatformSetting
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Description,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+	)
+	return i, err
+}
+
+const listPlatformSettings = `-- name: ListPlatformSettings :many
+SELECT key, value, description, updated_at, updated_by
+FROM platform_settings
+ORDER BY key
+`
+
+func (q *Queries) ListPlatformSettings(ctx context.Context) ([]PlatformSetting, error) {
+	rows, err := q.db.Query(ctx, listPlatformSettings)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PlatformSetting{}
+	for rows.Next() {
+		var i PlatformSetting
+		if err := rows.Scan(
+			&i.Key,
+			&i.Value,
+			&i.Description,
+			&i.UpdatedAt,
+			&i.UpdatedBy,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updatePlatformSetting = `-- name: UpdatePlatformSetting :exec
+UPDATE platform_settings
+SET value = $2, updated_at = now(), updated_by = $3
+WHERE key = $1
+`
+
+type UpdatePlatformSettingParams struct {
+	Key       string      `json:"key"`
+	Value     string      `json:"value"`
+	UpdatedBy pgtype.UUID `json:"updated_by"`
+}
+
+func (q *Queries) UpdatePlatformSetting(ctx context.Context, arg UpdatePlatformSettingParams) error {
+	_, err := q.db.Exec(ctx, updatePlatformSetting,
+		arg.Key,
+		arg.Value,
+		arg.UpdatedBy,
+	)
+	return err
+}

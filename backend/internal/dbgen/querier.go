@@ -18,6 +18,36 @@ type Querier interface {
 	ListLeasesForAccount(ctx context.Context, accountID pgtype.UUID) ([]ListLeasesForAccountRow, error)
 	ListProperties(ctx context.Context, accountID pgtype.UUID) ([]Property, error)
 	ListUnits(ctx context.Context, accountID pgtype.UUID) ([]Unit, error)
+	CreatePasswordReset(ctx context.Context, arg CreatePasswordResetParams) error
+	GetPasswordResetByToken(ctx context.Context, tokenHash string) (PasswordReset, error)
+	MarkPasswordResetUsed(ctx context.Context, id pgtype.UUID) error
+	ListPasswordResetsByUser(ctx context.Context, arg ListPasswordResetsByUserParams) ([]PasswordReset, error)
+	CreateBillingNotification(ctx context.Context, arg CreateBillingNotificationParams) error
+	ListPendingBillingNotifications(ctx context.Context, arg ListPendingBillingNotificationsParams) ([]BillingNotification, error)
+	MarkBillingNotificationSent(ctx context.Context, arg MarkBillingNotificationSentParams) error
+	MarkBillingNotificationFailed(ctx context.Context, arg MarkBillingNotificationFailedParams) error
+	CreateSubscriptionPayment(ctx context.Context, arg CreateSubscriptionPaymentParams) error
+	GetSubscriptionPaymentByCheckoutID(ctx context.Context, checkoutRequestID string) (SubscriptionPayment, error)
+	ListSubscriptionPaymentsByAccount(ctx context.Context, arg ListSubscriptionPaymentsByAccountParams) ([]SubscriptionPayment, error)
+	UpdateSubscriptionPaymentStatus(ctx context.Context, arg UpdateSubscriptionPaymentStatusParams) error
+	CreatePropertyAssignment(ctx context.Context, arg CreatePropertyAssignmentParams) error
+	ListPropertyAssignmentsByAgent(ctx context.Context, arg ListPropertyAssignmentsByAgentParams) ([]PropertyAssignment, error)
+	ListPropertyAssignmentsByProperty(ctx context.Context, arg ListPropertyAssignmentsByPropertyParams) ([]PropertyAssignment, error)
+	DeletePropertyAssignment(ctx context.Context, arg DeletePropertyAssignmentParams) error
+	CreateMaintenanceRequest(ctx context.Context, arg CreateMaintenanceRequestParams) error
+	GetMaintenanceRequestByReference(ctx context.Context, arg GetMaintenanceRequestByReferenceParams) (MaintenanceRequest, error)
+	ListMaintenanceRequestsByTenant(ctx context.Context, arg ListMaintenanceRequestsByTenantParams) ([]MaintenanceRequest, error)
+	ListMaintenanceRequestsByAccount(ctx context.Context, arg ListMaintenanceRequestsByAccountParams) ([]MaintenanceRequest, error)
+	ListMaintenanceRequestsByStatus(ctx context.Context, arg ListMaintenanceRequestsByStatusParams) ([]MaintenanceRequest, error)
+	UpdateMaintenanceRequestStatus(ctx context.Context, arg UpdateMaintenanceRequestStatusParams) error
+	AssignMaintenanceRequest(ctx context.Context, arg AssignMaintenanceRequestParams) error
+	CreateMaintenanceComment(ctx context.Context, arg CreateMaintenanceCommentParams) error
+	ListMaintenanceCommentsByRequest(ctx context.Context, requestID pgtype.UUID) ([]MaintenanceComment, error)
+	CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) error
+	ListAuditLogsByAccount(ctx context.Context, arg ListAuditLogsByAccountParams) ([]AuditLog, error)
+	GetPlatformSetting(ctx context.Context, key string) (PlatformSetting, error)
+	ListPlatformSettings(ctx context.Context) ([]PlatformSetting, error)
+	UpdatePlatformSetting(ctx context.Context, arg UpdatePlatformSettingParams) error
 }
 
 var _ Querier = (*Queries)(nil)

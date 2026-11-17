@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,11 +16,42 @@ func (s *Server) listProperties(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a, _ := s.account(r)
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		ids, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load properties")
+			return
+		}
+		if len(ids) == 0 {
+			writeData(w, 200, []map[string]any{})
+			return
+		}
+		// Build IN clause for assigned property IDs
+		args := []any{a}
+		placeholders := make([]string, len(ids))
+		for i, id := range ids {
+			args = append(args, id)
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+		}
+		query := fmt.Sprintf(`SELECT id,name,address,description,created_at,updated_at FROM properties WHERE account_id=$1 AND id IN (%s) ORDER BY created_at DESC`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
 	rows(w, r, `SELECT id,name,address,description,created_at,updated_at FROM properties WHERE account_id=$1 ORDER BY created_at DESC`, a)
 }
 func (s *Server) createProperty(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
+		return
+	}
+	p := principal(r)
+	if p.Role == "agent" {
+		writeErr(w, 403, "forbidden", "agents cannot create properties")
 		return
 	}
 	var in struct {
@@ -44,10 +76,23 @@ func (s *Server) getProperty(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a, _ := s.account(r)
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	propertyID := uuidParam(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 404, "not_found", "property not found")
+			return
+		}
+	}
 	var id, name, address, description string
 	var created, updated time.Time
-	e := s.DB.QueryRow(r.Context(), `SELECT id,name,address,description,created_at,updated_at FROM properties WHERE account_id=$1 AND id=$2`, a, uuidParam(r)).Scan(&id, &name, &address, &description, &created, &updated)
+	e = s.DB.QueryRow(r.Context(), `SELECT id,name,address,description,created_at,updated_at FROM properties WHERE account_id=$1 AND id=$2`, a, propertyID).Scan(&id, &name, &address, &description, &created, &updated)
 	if e != nil {
 		writeErr(w, 404, "not_found", "property not found")
 		return
@@ -58,6 +103,20 @@ func (s *Server) patchProperty(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	propertyID := uuidParam(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 404, "not_found", "property not found")
+			return
+		}
+	}
 	var in struct {
 		Name        *string `json:"name"`
 		Address     *string `json:"address"`
@@ -67,8 +126,7 @@ func (s *Server) patchProperty(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "invalid property fields")
 		return
 	}
-	a, _ := s.account(r)
-	tag, e := s.DB.Exec(r.Context(), `UPDATE properties SET name=coalesce($3,name),address=coalesce($4,address),description=coalesce($5,description),updated_at=now() WHERE account_id=$1 AND id=$2`, a, uuidParam(r), in.Name, in.Address, in.Description)
+	tag, e := s.DB.Exec(r.Context(), `UPDATE properties SET name=coalesce($3,name),address=coalesce($4,address),description=coalesce($5,description),updated_at=now() WHERE account_id=$1 AND id=$2`, a, propertyID, in.Name, in.Address, in.Description)
 	if e != nil || tag.RowsAffected() == 0 {
 		writeErr(w, 404, "not_found", "property not found")
 		return
@@ -79,8 +137,21 @@ func (s *Server) deleteProperty(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a, _ := s.account(r)
-	tag, e := s.DB.Exec(r.Context(), `DELETE FROM properties WHERE account_id=$1 AND id=$2`, a, uuidParam(r))
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	propertyID := uuidParam(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 404, "not_found", "property not found")
+			return
+		}
+	}
+	tag, e := s.DB.Exec(r.Context(), `DELETE FROM properties WHERE account_id=$1 AND id=$2`, a, propertyID)
 	if e != nil {
 		writeErr(w, 409, "in_use", "property or its units are still referenced by a lease")
 		return
@@ -89,13 +160,38 @@ func (s *Server) deleteProperty(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not_found", "property not found")
 		return
 	}
-	writeData(w, 200, map[string]string{"deleted": uuidParam(r)})
+	writeData(w, 200, map[string]string{"deleted": propertyID})
 }
 func (s *Server) listUnits(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a, _ := s.account(r)
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		ids, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load units")
+			return
+		}
+		if len(ids) == 0 {
+			writeData(w, 200, []map[string]any{})
+			return
+		}
+		args := []any{a}
+		placeholders := make([]string, len(ids))
+		for i, id := range ids {
+			args = append(args, id)
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+		}
+		query := fmt.Sprintf(`SELECT u.id,u.property_id,p.name AS property_name,u.code,u.bedrooms,u.rent_amount,u.status,u.created_at,u.updated_at FROM units u JOIN properties p ON p.id=u.property_id AND p.account_id=u.account_id WHERE u.account_id=$1 AND u.property_id IN (%s) ORDER BY p.name,u.code`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
 	rows(w, r, `SELECT u.id,u.property_id,p.name AS property_name,u.code,u.bedrooms,u.rent_amount,u.status,u.created_at,u.updated_at FROM units u JOIN properties p ON p.id=u.property_id AND p.account_id=u.account_id WHERE u.account_id=$1 ORDER BY p.name,u.code`, a)
 }
 func (s *Server) createUnit(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +216,19 @@ func (s *Server) createUnit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_status", "a new unit must be vacant or in maintenance until assigned to a lease")
 		return
 	}
-	a, _ := s.account(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	p := principal(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccess(r, in.PropertyID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "property not assigned to this agent")
+			return
+		}
+	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
 		writeErr(w, 500, "database_error", "could not start transaction")
@@ -164,17 +272,37 @@ func (s *Server) patchUnit(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	unitID := uuidParam(r)
+	if p.Role == "agent" {
+		// Resolve the unit's property and check agent assignment
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT property_id FROM units WHERE account_id=$1 AND id=$2`, a, unitID).Scan(&propertyID)
+		if e != nil {
+			writeErr(w, 404, "not_found", "unit not found")
+			return
+		}
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "unit not assigned to this agent")
+			return
+		}
+	}
 	var in struct {
-		Code     *string  `json:"code"`
+		Code     string   `json:"code"`
 		Bedrooms *int     `json:"bedrooms"`
 		Rent     *float64 `json:"rent_amount"`
 		Status   *string  `json:"status"`
 	}
-	if decode(r, &in) != nil || (in.Code != nil && !validUnitCode(*in.Code)) || (in.Status != nil && *in.Status != "vacant" && *in.Status != "occupied" && *in.Status != "maintenance") {
-		writeErr(w, 400, "invalid_request", "invalid unit fields; unit code must be at most 12 characters")
+	if decode(r, &in) != nil {
+		writeErr(w, 400, "invalid_request", "invalid unit fields")
 		return
 	}
-	a, _ := s.account(r)
 	if in.Status != nil {
 		var activeLease bool
 		if e := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM leases WHERE account_id=$1 AND unit_id=$2 AND status='active')`, a, uuidParam(r)).Scan(&activeLease); e != nil {
@@ -197,8 +325,27 @@ func (s *Server) deleteUnit(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a, _ := s.account(r)
-	tag, e := s.DB.Exec(r.Context(), `DELETE FROM units WHERE account_id=$1 AND id=$2`, a, uuidParam(r))
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	unitID := uuidParam(r)
+	if p.Role == "agent" {
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT property_id FROM units WHERE account_id=$1 AND id=$2`, a, unitID).Scan(&propertyID)
+		if e != nil {
+			writeErr(w, 404, "not_found", "unit not found")
+			return
+		}
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "unit not assigned to this agent")
+			return
+		}
+	}
+	tag, e := s.DB.Exec(r.Context(), `DELETE FROM units WHERE account_id=$1 AND id=$2`, a, unitID)
 	if e != nil {
 		writeErr(w, 409, "in_use", "unit is referenced by a lease")
 		return
@@ -218,9 +365,39 @@ func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	rows(w, r, `SELECT id,full_name,email,phone,national_id,created_at,updated_at FROM tenants WHERE account_id=$1 ORDER BY full_name`, p.AccountID)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		ids, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load tenants")
+			return
+		}
+		if len(ids) == 0 {
+			writeData(w, 200, []map[string]any{})
+			return
+		}
+		args := []any{a}
+		placeholders := make([]string, len(ids))
+		for i, id := range ids {
+			args = append(args, id)
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+		}
+		query := fmt.Sprintf(`SELECT DISTINCT t.id,t.full_name,t.email,t.phone,t.national_id,t.created_at,t.updated_at FROM tenants t JOIN leases l ON l.tenant_id=t.id AND l.account_id=t.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE t.account_id=$1 AND u.property_id IN (%s) ORDER BY t.full_name`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
+	rows(w, r, `SELECT id,full_name,email,phone,national_id,created_at,updated_at FROM tenants WHERE account_id=$1 ORDER BY full_name`, a)
 }
 func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "landlord" && p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "only landlords or super_admins can create tenants")
+		return
+	}
 	if !s.manager(w, r) {
 		return
 	}
@@ -231,7 +408,7 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		NationalID string `json:"national_id"`
 		Password   string `json:"password"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || len(in.Password) < 10 {
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || validatePassword(in.Password) != nil {
 		writeErr(w, 400, "invalid_request", "full_name, valid email, and password of at least 10 characters are required")
 		return
 	}
@@ -242,7 +419,12 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var id string
-	e = tx.QueryRow(r.Context(), `INSERT INTO tenants(account_id,full_name,email,phone,national_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, principal(r).AccountID, in.Name, strings.ToLower(in.Email), in.Phone, in.NationalID).Scan(&id)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	e = tx.QueryRow(r.Context(), `INSERT INTO tenants(account_id,full_name,email,phone,national_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, a, in.Name, strings.ToLower(in.Email), in.Phone, in.NationalID).Scan(&id)
 	if e == nil {
 		var hash []byte
 		hash, e = bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
@@ -264,6 +446,27 @@ func (s *Server) patchTenant(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	tenantID := uuidParam(r)
+	if p.Role == "agent" {
+		// Check if tenant has a lease in a property assigned to this agent
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT u.property_id FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.tenant_id=$1 AND l.account_id=$2 AND l.status='active' LIMIT 1`, tenantID, a).Scan(&propertyID)
+		if e != nil {
+			writeErr(w, 404, "not_found", "tenant not found")
+			return
+		}
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "tenant not assigned to this agent")
+			return
+		}
+	}
 	var in struct {
 		Name       *string `json:"full_name"`
 		Email      *string `json:"email"`
@@ -274,8 +477,7 @@ func (s *Server) patchTenant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "invalid tenant fields")
 		return
 	}
-	a := principal(r).AccountID
-	tag, e := s.DB.Exec(r.Context(), `UPDATE tenants SET full_name=coalesce($3,full_name),email=coalesce($4,email),phone=coalesce($5,phone),national_id=coalesce($6,national_id),updated_at=now() WHERE account_id=$1 AND id=$2`, a, uuidParam(r), in.Name, in.Email, in.Phone, in.NationalID)
+	tag, e := s.DB.Exec(r.Context(), `UPDATE tenants SET full_name=coalesce($3,full_name),email=coalesce($4,email),phone=coalesce($5,phone),national_id=coalesce($6,national_id),updated_at=now() WHERE account_id=$1 AND id=$2`, a, tenantID, in.Name, in.Email, in.Phone, in.NationalID)
 	if e != nil || tag.RowsAffected() == 0 {
 		writeErr(w, 404, "not_found", "tenant not found")
 		return
@@ -286,8 +488,27 @@ func (s *Server) deleteTenant(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a := principal(r).AccountID
-	tag, e := s.DB.Exec(r.Context(), `DELETE FROM tenants WHERE account_id=$1 AND id=$2`, a, uuidParam(r))
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	tenantID := uuidParam(r)
+	if p.Role == "agent" {
+		var propertyID string
+		e := s.DB.QueryRow(r.Context(), `SELECT u.property_id FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.tenant_id=$1 AND l.account_id=$2 AND l.status='active' LIMIT 1`, tenantID, a).Scan(&propertyID)
+		if e != nil {
+			writeErr(w, 404, "not_found", "tenant not found")
+			return
+		}
+		ok, e := s.checkPropertyAccess(r, propertyID)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "tenant not assigned to this agent")
+			return
+		}
+	}
+	tag, e := s.DB.Exec(r.Context(), `DELETE FROM tenants WHERE account_id=$1 AND id=$2`, a, tenantID)
 	if e != nil {
 		writeErr(w, 409, "in_use", "tenant has related lease or payment records")
 		return
@@ -307,7 +528,32 @@ func (s *Server) listLeases(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	rows(w, r, `SELECT l.id,l.unit_id,u.code AS unit_code,p.name AS property_name,l.tenant_id,t.full_name AS tenant_name,l.start_date,l.end_date,l.rent_amount,l.due_day,l.deposit_amount,l.status FROM leases l JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id JOIN tenants t ON t.id=l.tenant_id AND t.account_id=l.account_id WHERE l.account_id=$1 ORDER BY l.start_date DESC`, p.AccountID)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		ids, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load leases")
+			return
+		}
+		if len(ids) == 0 {
+			writeData(w, 200, []map[string]any{})
+			return
+		}
+		args := []any{a}
+		placeholders := make([]string, len(ids))
+		for i, id := range ids {
+			args = append(args, id)
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+		}
+		query := fmt.Sprintf(`SELECT l.id,l.unit_id,u.code AS unit_code,p.name AS property_name,l.tenant_id,t.full_name AS tenant_name,l.start_date,l.end_date,l.rent_amount,l.due_day,l.deposit_amount,l.status FROM leases l JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id JOIN tenants t ON t.id=l.tenant_id AND t.account_id=l.account_id WHERE l.account_id=$1 AND p.id IN (%s) ORDER BY l.start_date DESC`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
+	rows(w, r, `SELECT l.id,l.unit_id,u.code AS unit_code,p.name AS property_name,l.tenant_id,t.full_name AS tenant_name,l.start_date,l.end_date,l.rent_amount,l.due_day,l.deposit_amount,l.status FROM leases l JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id JOIN tenants t ON t.id=l.tenant_id AND t.account_id=l.account_id WHERE l.account_id=$1 ORDER BY l.start_date DESC`, a)
 }
 func (s *Server) createLease(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
@@ -333,7 +579,19 @@ func (s *Server) createLease(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "due_day must be between 1 and 31 and deposit_amount cannot be negative")
 		return
 	}
-	a := principal(r).AccountID
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	p := principal(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccessByUnit(r, in.UnitID, a)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "unit not assigned to this agent")
+			return
+		}
+	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
 		writeErr(w, 500, "database_error", "could not start transaction")
@@ -357,6 +615,20 @@ func (s *Server) patchLease(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
+	p := principal(r)
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	leaseID := uuidParam(r)
+	if p.Role == "agent" {
+		ok, e := s.checkPropertyAccessByLease(r, leaseID, a)
+		if e != nil || !ok {
+			writeErr(w, 403, "forbidden", "lease not assigned to this agent")
+			return
+		}
+	}
 	var in struct {
 		EndDate *string  `json:"end_date"`
 		Rent    *float64 `json:"rent_amount"`
@@ -368,8 +640,7 @@ func (s *Server) patchLease(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "invalid lease fields")
 		return
 	}
-	a := principal(r).AccountID
-	tag, e := s.DB.Exec(r.Context(), `UPDATE leases SET end_date=coalesce($3::date,end_date),rent_amount=coalesce($4,rent_amount),due_day=coalesce($5,due_day),deposit_amount=coalesce($6,deposit_amount),status=coalesce($7,status),updated_at=now() WHERE account_id=$1 AND id=$2`, a, uuidParam(r), in.EndDate, in.Rent, in.DueDay, in.Deposit, in.Status)
+	tag, e := s.DB.Exec(r.Context(), `UPDATE leases SET end_date=coalesce($3::date,end_date),rent_amount=coalesce($4,rent_amount),due_day=coalesce($5,due_day),deposit_amount=coalesce($6,deposit_amount),status=coalesce($7,status),updated_at=now() WHERE account_id=$1 AND id=$2`, a, leaseID, in.EndDate, in.Rent, in.DueDay, in.Deposit, in.Status)
 	if e != nil || tag.RowsAffected() == 0 {
 		writeErr(w, 404, "not_found", "lease not found or invalid update")
 		return
@@ -473,7 +744,32 @@ func (s *Server) listInvoices(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	a := p.AccountID
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load invoices")
+			return
+		}
+		if len(propIDs) == 0 {
+			rows(w, r, `SELECT i.id,i.lease_id,i.tenant_id,t.full_name AS tenant_name,u.code AS unit_code,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,i.status FROM invoices i JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id WHERE i.account_id=$1 AND false ORDER BY i.due_date DESC`, a)
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+1)
+		args[0] = a
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+			args[i+1] = id
+		}
+		query := fmt.Sprintf(`SELECT i.id,i.lease_id,i.tenant_id,t.full_name AS tenant_name,u.code AS unit_code,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,i.status FROM invoices i JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id WHERE i.account_id=$1 AND p.id IN (%s) ORDER BY i.due_date DESC`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
 	if e := s.ensureInvoices(r, a); e != nil {
 		writeErr(w, 500, "invoice_generation_failed", "could not create monthly invoices")
 		return
@@ -485,13 +781,120 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if p.Role == "tenant" {
 		var due, paid float64
 		_ = s.DB.QueryRow(r.Context(), `SELECT coalesce(sum(amount-paid_amount),0),coalesce(sum(paid_amount),0) FROM invoices WHERE tenant_id=$1 AND due_date<=current_date`, p.TenantID).Scan(&due, &paid)
-		writeData(w, 200, map[string]any{"outstanding": due, "paid": paid})
+		var propertyName, propertyAddress, unitCode, leaseID, leaseStart, leaseEnd, leaseStatus string
+		var rentAmount float64
+		_ = s.DB.QueryRow(r.Context(), `SELECT p.name, p.address, u.code, l.id, l.start_date, l.end_date, l.rent_amount, l.status FROM leases l JOIN units u ON u.id=l.unit_id JOIN properties p ON p.id=u.property_id WHERE l.tenant_id=$1 AND l.status='active' ORDER BY l.start_date DESC LIMIT 1`, p.TenantID).Scan(&propertyName, &propertyAddress, &unitCode, &leaseID, &leaseStart, &leaseEnd, &rentAmount, &leaseStatus)
+		var submitted, pending, inProgress, completed int
+		_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FILTER (WHERE status='submitted'), count(*) FILTER (WHERE status IN ('submitted','under_review','assigned')), count(*) FILTER (WHERE status='in_progress'), count(*) FILTER (WHERE status='resolved') FROM maintenance_requests WHERE tenant_id=$1`, p.TenantID).Scan(&submitted, &pending, &inProgress, &completed)
+		writeData(w, 200, map[string]any{
+			"outstanding": due, "paid": paid,
+			"property_name": propertyName, "property_address": propertyAddress,
+			"unit_code": unitCode, "lease_id": leaseID,
+			"lease_start": leaseStart, "lease_end": leaseEnd,
+			"lease_status": leaseStatus, "rent_amount": rentAmount,
+			"maintenance": map[string]any{"submitted": submitted, "pending": pending, "in_progress": inProgress, "completed": completed},
+		})
 		return
 	}
 	if !s.manager(w, r) {
 		return
 	}
-	a := p.AccountID
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		if len(propIDs) == 0 {
+			writeData(w, 200, map[string]any{"properties": 0, "units": 0, "occupied_units": 0, "vacant_units": 0, "tenants": 0, "expected_this_month": 0, "collected_this_month": 0, "collection_rate": 0, "arrears_total": 0, "recent_payments": []map[string]any{}})
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs))
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		propFilter := fmt.Sprintf("IN (%s)", strings.Join(placeholders, ","))
+		zone := time.FixedZone("EAT", 3*60*60)
+		now := time.Now().In(zone)
+		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, zone)
+		nextMonth := monthStart.AddDate(0, 1, 0)
+		today := now.Format("2006-01-02")
+		var props, units, tenants, occupied, vacant int
+		var expected, collected, arrears float64
+		qProps := fmt.Sprintf(`SELECT count(*) FROM properties WHERE id %s`, propFilter)
+		if e := s.DB.QueryRow(r.Context(), qProps, args...).Scan(&props); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		qUnits := fmt.Sprintf(`SELECT count(*),count(*) FILTER(WHERE status='occupied'),count(*) FILTER(WHERE status='vacant') FROM units WHERE property_id %s`, propFilter)
+		if e := s.DB.QueryRow(r.Context(), qUnits, args...).Scan(&units, &occupied, &vacant); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		qTenants := fmt.Sprintf(`SELECT count(*) FROM tenants t JOIN leases l ON l.tenant_id=t.id AND l.account_id=t.account_id JOIN units u ON u.id=l.unit_id WHERE u.property_id %s`, propFilter)
+		if e := s.DB.QueryRow(r.Context(), qTenants, args...).Scan(&tenants); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		qExpected := fmt.Sprintf(`SELECT coalesce(sum(l.rent_amount),0) FROM leases l JOIN units u ON u.id=l.unit_id WHERE l.status='active' AND l.start_date<$%d::date AND (l.end_date IS NULL OR l.end_date >= $%d::date) AND u.property_id %s`, len(propIDs)+1, len(propIDs)+2, propFilter)
+		qExpectedArgs := append([]any{}, args...)
+		qExpectedArgs = append(qExpectedArgs, monthStart.Format("2006-01-02"), nextMonth.Format("2006-01-02"))
+		if e := s.DB.QueryRow(r.Context(), qExpected, qExpectedArgs...).Scan(&expected); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		qCollected := fmt.Sprintf(`SELECT coalesce(sum(p.amount),0) FROM payments p JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id JOIN leases l ON l.id=(SELECT la.id FROM leases la JOIN units uu ON uu.id=la.unit_id WHERE uu.property_id %s AND la.account_id=t.account_id AND la.tenant_id=t.id ORDER BY la.created_at DESC LIMIT 1) WHERE p.status='completed' AND (coalesce(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date >= $%d::date AND (coalesce(p.transaction_date,p.created_at) AT TIME ZONE 'Africa/Nairobi')::date < $%d::date`, propFilter, len(propIDs)+1, len(propIDs)+2)
+		qCollectedArgs := append([]any{}, args...)
+		qCollectedArgs = append(qCollectedArgs, monthStart.Format("2006-01-02"), nextMonth.Format("2006-01-02"))
+		if e := s.DB.QueryRow(r.Context(), qCollected, qCollectedArgs...).Scan(&collected); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		qArrears := fmt.Sprintf(`SELECT coalesce(sum(i.amount-i.paid_amount),0) FROM invoices i JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id WHERE u.property_id %s AND i.due_date<$%d::date AND i.paid_amount<i.amount`, propFilter, len(propIDs)+1)
+		qArrearsArgs := append([]any{}, args...)
+		qArrearsArgs = append(qArrearsArgs, today)
+		if e := s.DB.QueryRow(r.Context(), qArrears, qArrearsArgs...).Scan(&arrears); e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		rate := float64(0)
+		if expected > 0 {
+			rate = collected / expected * 100
+		}
+		qRecent := fmt.Sprintf(`SELECT p.id,coalesce(t.full_name,''),coalesce((SELECT u.code FROM payment_allocations pa JOIN invoices i ON i.id=pa.invoice_id AND i.account_id=pa.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE pa.payment_id=p.id AND pa.account_id=p.account_id ORDER BY i.due_date DESC LIMIT 1),''),p.amount,p.method,p.status,coalesce(p.external_ref,p.checkout_request_id,''),coalesce(p.transaction_date,p.created_at) FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id AND t.account_id=p.account_id WHERE p.status='completed' AND EXISTS(SELECT 1 FROM leases l2 JOIN units u2 ON u2.id=l2.unit_id WHERE l2.tenant_id=p.tenant_id AND l2.account_id=p.account_id AND u2.property_id %s) ORDER BY coalesce(p.transaction_date,p.created_at) DESC LIMIT 6`, propFilter)
+		rs, e := s.DB.Query(r.Context(), qRecent, args...)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		recent := []map[string]any{}
+		for rs.Next() {
+			var id, tenantName, unitCode, method, status, receipt string
+			var amount float64
+			var paidAt time.Time
+			if e = rs.Scan(&id, &tenantName, &unitCode, &amount, &method, &status, &receipt, &paidAt); e != nil {
+				rs.Close()
+				writeErr(w, 500, "database_error", "could not load dashboard")
+				return
+			}
+			recent = append(recent, map[string]any{"id": id, "tenant_name": tenantName, "unit_code": unitCode, "amount": amount, "method": method, "status": status, "receipt_number": receipt, "payment_date": paidAt})
+		}
+		if e = rs.Err(); e != nil {
+			rs.Close()
+			writeErr(w, 500, "database_error", "could not load dashboard")
+			return
+		}
+		rs.Close()
+		writeData(w, 200, map[string]any{"properties": props, "units": units, "occupied_units": occupied, "vacant_units": vacant, "tenants": tenants, "expected_this_month": expected, "collected_this_month": collected, "collection_rate": rate, "arrears_total": arrears, "recent_payments": recent})
+		return
+	}
 	if e := s.ensureInvoices(r, a); e != nil {
 		writeErr(w, 500, "invoice_generation_failed", "could not create monthly invoices")
 		return
@@ -559,10 +962,363 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 
 func validUnitCode(code string) bool { v := strings.TrimSpace(code); return v != "" && len(v) <= 12 }
 
+// listPlatformSubscriptions returns accounts with subscription details.
+func (s *Server) listPlatformSubscriptions(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+	page, pageSize := 1, 20
+	if v := r.URL.Query().Get("page"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 {
+			writeErr(w, 400, "invalid_request", "page must be positive")
+			return
+		}
+		page = n
+	}
+	if v := r.URL.Query().Get("page_size"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 100 {
+			writeErr(w, 400, "invalid_request", "page_size 1-100")
+			return
+		}
+		pageSize = n
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	where := ""
+	args := []any{}
+	conds := []string{}
+	if status != "" {
+		conds = append(conds, fmt.Sprintf("subscription_status=$%d", len(args)+1))
+		args = append(args, status)
+	}
+	if search != "" {
+		conds = append(conds, fmt.Sprintf("name ILIKE $%d", len(args)+1))
+		args = append(args, "%"+search+"%")
+	}
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+	var total int
+	_ = s.DB.QueryRow(r.Context(), "SELECT count(*) FROM accounts "+where, args...).Scan(&total)
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	q := fmt.Sprintf(`SELECT id, name, subscription_status, subscription_plan_id, subscription_started_at, subscription_renews_at, subscription_expires_at, suspended_at FROM accounts %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	rows, e := s.DB.Query(r.Context(), q, queryArgs...)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not load subscriptions")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, name, status string
+		var planID *string
+		var startedAt, renewsAt, expiresAt, suspendedAt interface{}
+		if e := rows.Scan(&id, &name, &status, &planID, &startedAt, &renewsAt, &expiresAt, &suspendedAt); e != nil {
+			writeErr(w, 500, "database_error", "could not read subscriptions")
+			return
+		}
+		out = append(out, map[string]any{"account_id": id, "account_name": name, "status": status, "plan_id": planID, "started_at": startedAt, "renews_at": renewsAt, "expires_at": expiresAt, "suspended_at": suspendedAt})
+	}
+	writeData(w, 200, map[string]any{"subscriptions": out, "pagination": map[string]any{"page": page, "page_size": pageSize, "total": total, "total_pages": (total + pageSize - 1) / pageSize}})
+}
+
+// listPlatformAuditLogs returns paginated audit logs.
+func (s *Server) listPlatformAuditLogs(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+	page, pageSize := 1, 20
+	if v := r.URL.Query().Get("page"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 {
+			writeErr(w, 400, "invalid_request", "page must be positive")
+			return
+		}
+		page = n
+	}
+	if v := r.URL.Query().Get("page_size"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 100 {
+			writeErr(w, 400, "invalid_request", "page_size 1-100")
+			return
+		}
+		pageSize = n
+	}
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	resourceType := strings.TrimSpace(r.URL.Query().Get("resource_type"))
+	where := ""
+	args := []any{}
+	conds := []string{}
+	if action != "" {
+		conds = append(conds, fmt.Sprintf("action=$%d", len(args)+1))
+		args = append(args, action)
+	}
+	if resourceType != "" {
+		conds = append(conds, fmt.Sprintf("resource_type=$%d", len(args)+1))
+		args = append(args, resourceType)
+	}
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+	var total int
+	_ = s.DB.QueryRow(r.Context(), "SELECT count(*) FROM audit_logs "+where, args...).Scan(&total)
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	q := fmt.Sprintf(`SELECT id, actor_id, actor_role, actor_email, action, resource_type, resource_id, account_id, created_at FROM audit_logs %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	rows, e := s.DB.Query(r.Context(), q, queryArgs...)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not load audit logs")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, actorRole, actorEmail, action, resourceType, resourceID string
+		var actorID, accountID *string
+		var createdAt interface{}
+		if e := rows.Scan(&id, &actorID, &actorRole, &actorEmail, &action, &resourceType, &resourceID, &accountID, &createdAt); e != nil {
+			writeErr(w, 500, "database_error", "could not read audit logs")
+			return
+		}
+		out = append(out, map[string]any{"id": id, "actor_id": actorID, "actor_role": actorRole, "actor_email": actorEmail, "action": action, "resource_type": resourceType, "resource_id": resourceID, "account_id": accountID, "created_at": createdAt})
+	}
+	writeData(w, 200, map[string]any{"audit_logs": out, "pagination": map[string]any{"page": page, "page_size": pageSize, "total": total, "total_pages": (total + pageSize - 1) / pageSize}})
+}
+
+// platformOverview returns platform-wide summary statistics for super_admin.
+func (s *Server) platformOverview(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+	var totalAccounts, totalProperties, totalUnits, totalTenants int
+	var activeSubs, trialingSubs, pastDueSubs, suspendedSubs, cancelledSubs int
+	var revenue float64
+	_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM accounts`).Scan(&totalAccounts)
+	_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM properties`).Scan(&totalProperties)
+	_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM units`).Scan(&totalUnits)
+	_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM tenants`).Scan(&totalTenants)
+	_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FILTER (WHERE subscription_status='active'), count(*) FILTER (WHERE subscription_status='trialing'), count(*) FILTER (WHERE subscription_status='past_due'), count(*) FILTER (WHERE subscription_status='suspended'), count(*) FILTER (WHERE subscription_status='cancelled') FROM accounts`).Scan(&activeSubs, &trialingSubs, &pastDueSubs, &suspendedSubs, &cancelledSubs)
+	_ = s.DB.QueryRow(r.Context(), `SELECT coalesce(sum(amount),0) FROM subscription_payments WHERE status='completed'`).Scan(&revenue)
+	writeData(w, 200, map[string]any{
+		"total_accounts":   totalAccounts,
+		"total_properties": totalProperties,
+		"total_units":      totalUnits,
+		"total_tenants":    totalTenants,
+		"subscriptions": map[string]any{
+			"active":    activeSubs,
+			"trialing":  trialingSubs,
+			"past_due":  pastDueSubs,
+			"suspended": suspendedSubs,
+			"cancelled": cancelledSubs,
+		},
+		"subscription_revenue": revenue,
+	})
+}
+
+// listPlatformSubscriptionPayments returns paginated subscription payments.
+func (s *Server) listPlatformSubscriptionPayments(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+	page, pageSize := 1, 20
+	if v := r.URL.Query().Get("page"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 {
+			writeErr(w, 400, "invalid_request", "page must be positive")
+			return
+		}
+		page = n
+	}
+	if v := r.URL.Query().Get("page_size"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 100 {
+			writeErr(w, 400, "invalid_request", "page_size 1-100")
+			return
+		}
+		pageSize = n
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	offset := (page - 1) * pageSize
+	where := ""
+	args := []any{}
+	if status != "" {
+		where = "WHERE sp.status=$1"
+		args = append(args, status)
+	}
+	var total int
+	_ = s.DB.QueryRow(r.Context(), "SELECT count(*) FROM subscription_payments sp "+where, args...).Scan(&total)
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, offset)
+	q := fmt.Sprintf(`SELECT sp.id, sp.account_id, a.name, sp.amount, sp.method, sp.status, sp.external_ref, sp.created_at
+		FROM subscription_payments sp JOIN accounts a ON a.id=sp.account_id %s ORDER BY sp.created_at DESC LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	rows, e := s.DB.Query(r.Context(), q, queryArgs...)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not load payments")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, accountID, accountName, method, st string
+		var amount float64
+		var extRef *string
+		var createdAt interface{}
+		if e := rows.Scan(&id, &accountID, &accountName, &amount, &method, &st, &extRef, &createdAt); e != nil {
+			writeErr(w, 500, "database_error", "could not read payments")
+			return
+		}
+		out = append(out, map[string]any{"id": id, "account_id": accountID, "account_name": accountName, "amount": amount, "method": method, "status": st, "external_ref": extRef, "created_at": createdAt})
+	}
+	writeData(w, 200, map[string]any{"payments": out, "pagination": map[string]any{"page": page, "page_size": pageSize, "total": total, "total_pages": (total + pageSize - 1) / pageSize}})
+}
+
+// platformRevenue aggregates successful subscription payments with optional date filter.
+func (s *Server) platformRevenue(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	where := "WHERE status='completed'"
+	args := []any{}
+	idx := 1
+	if from != "" {
+		where += fmt.Sprintf(" AND created_at >= $%d", idx)
+		args = append(args, from)
+		idx++
+	}
+	if to != "" {
+		where += fmt.Sprintf(" AND created_at <= $%d", idx)
+		args = append(args, to)
+		idx++
+	}
+	var total float64
+	var count int
+	q := "SELECT coalesce(sum(amount),0), count(*) FROM subscription_payments " + where
+	if e := s.DB.QueryRow(r.Context(), q, args...).Scan(&total, &count); e != nil {
+		writeErr(w, 500, "database_error", "could not compute revenue")
+		return
+	}
+	writeData(w, 200, map[string]any{"total_revenue": total, "completed_payments": count, "from": from, "to": to})
+}
+
+// listPlatformAccounts returns a paginated list of accounts/landlords for
+// super_admin users only. It never exposes credentials or secrets.
+func (s *Server) listPlatformAccounts(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "super_admin access required")
+		return
+	}
+
+	page := 1
+	pageSize := 20
+	if v := r.URL.Query().Get("page"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 {
+			writeErr(w, 400, "invalid_request", "page must be a positive integer")
+			return
+		}
+		page = n
+	}
+	if v := r.URL.Query().Get("page_size"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 100 {
+			writeErr(w, 400, "invalid_request", "page_size must be between 1 and 100")
+			return
+		}
+		pageSize = n
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+
+	offset := (page - 1) * pageSize
+
+	args := []any{}
+	where := ""
+	if search != "" {
+		where = "WHERE a.name ILIKE $1 OR EXISTS (SELECT 1 FROM users u WHERE u.account_id=a.id AND u.email ILIKE $1)"
+		args = append(args, "%"+search+"%")
+	}
+
+	// Count total.
+	var total int
+	countQ := "SELECT count(*) FROM accounts a " + where
+	if e := s.DB.QueryRow(r.Context(), countQ, args...).Scan(&total); e != nil {
+		writeErr(w, 500, "database_error", "could not count accounts")
+		return
+	}
+
+	// Fetch page.
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, offset)
+	limitIdx := len(args) + 1
+	offsetIdx := len(args) + 2
+	query := fmt.Sprintf(`SELECT a.id, a.name, a.subscription_status, a.subscription_plan_id, a.created_at, a.updated_at,
+		(SELECT count(*) FROM properties p WHERE p.account_id=a.id) AS property_count,
+		(SELECT count(*) FROM tenants t WHERE t.account_id=a.id) AS tenant_count
+		FROM accounts a %s ORDER BY a.created_at DESC LIMIT $%d OFFSET $%d`, where, limitIdx, offsetIdx)
+
+	rows, e := s.DB.Query(r.Context(), query, queryArgs...)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not load accounts")
+		return
+	}
+	defer rows.Close()
+
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, name, status string
+		var planID *string
+		var createdAt, updatedAt interface{}
+		var propCount, tenantCount int
+		if e := rows.Scan(&id, &name, &status, &planID, &createdAt, &updatedAt, &propCount, &tenantCount); e != nil {
+			writeErr(w, 500, "database_error", "could not read accounts")
+			return
+		}
+		out = append(out, map[string]any{
+			"id":                   id,
+			"name":                 name,
+			"subscription_status":  status,
+			"subscription_plan_id": planID,
+			"property_count":       propCount,
+			"tenant_count":         tenantCount,
+			"created_at":           createdAt,
+			"updated_at":           updatedAt,
+		})
+	}
+	if e := rows.Err(); e != nil {
+		writeErr(w, 500, "database_error", "could not read accounts")
+		return
+	}
+
+	writeData(w, 200, map[string]any{
+		"accounts": out,
+		"pagination": map[string]any{
+			"page":        page,
+			"page_size":   pageSize,
+			"total":       total,
+			"total_pages": (total + pageSize - 1) / pageSize,
+		},
+	})
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	if p.Role != "landlord" {
-		writeErr(w, 403, "forbidden", "only the landlord can add agents")
+	if p.Role != "landlord" && p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "only the landlord or super_admin can add agents")
 		return
 	}
 	var in struct {
@@ -570,10 +1326,20 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Phone    string `json:"phone"`
 		Password string `json:"password"`
+		// AccountID is required when the caller is super_admin to specify the target landlord account.
+		AccountID *string `json:"account_id"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || len(in.Password) < 10 {
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || validatePassword(in.Password) != nil {
 		writeErr(w, 400, "invalid_request", "name, valid email, and password of at least 10 characters are required")
 		return
+	}
+	accountID := p.AccountID
+	if p.Role == "super_admin" {
+		if in.AccountID == nil || strings.TrimSpace(*in.AccountID) == "" {
+			writeErr(w, 400, "invalid_request", "account_id is required when creating an agent as super_admin")
+			return
+		}
+		accountID = *in.AccountID
 	}
 	hash, e := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
 	if e != nil {
@@ -581,12 +1347,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id string
-	e = s.DB.QueryRow(r.Context(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,$4,$5,'agent') RETURNING id`, p.AccountID, in.Email, in.Name, in.Phone, string(hash)).Scan(&id)
+	e = s.DB.QueryRow(r.Context(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,$4,$5,'agent') RETURNING id`, accountID, in.Email, in.Name, in.Phone, string(hash)).Scan(&id)
 	if e != nil {
 		writeErr(w, 409, "agent_create_failed", "could not add agent (email may already be registered)")
 		return
 	}
-	writeData(w, 201, map[string]any{"id": id, "name": in.Name, "email": strings.ToLower(in.Email), "phone": in.Phone, "role": "agent", "accountId": p.AccountID})
+	writeData(w, 201, map[string]any{"id": id, "name": in.Name, "email": strings.ToLower(in.Email), "phone": in.Phone, "role": "agent", "accountId": accountID})
 }
 
 func (s *Server) overdueInvoices(w http.ResponseWriter, r *http.Request) {
@@ -599,12 +1365,40 @@ func (s *Server) overdueInvoices(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
 		return
 	}
-	if e := s.ensureInvoices(r, p.AccountID); e != nil {
-		writeErr(w, 500, "invoice_generation_failed", "could not create monthly invoices")
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
 		return
 	}
 	today := time.Now().In(time.FixedZone("EAT", 3*60*60)).Format("2006-01-02")
-	rows(w, r, `SELECT i.id,i.tenant_id,t.full_name AS tenant_name,i.lease_id,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,($2::date-i.due_date) AS days_overdue,u.code AS unit_code FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE i.account_id=$1 AND i.due_date<$2::date AND i.paid_amount<i.amount ORDER BY i.due_date`, p.AccountID, today)
+	if p.Role == "agent" {
+		propIDs, e := s.agentAssignedPropertyIDs(r)
+		if e != nil {
+			writeErr(w, 500, "database_error", "could not load overdue invoices")
+			return
+		}
+		if len(propIDs) == 0 {
+			rows(w, r, `SELECT i.id,i.tenant_id,t.full_name AS tenant_name,i.lease_id,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,($2::date-i.due_date) AS days_overdue,u.code AS unit_code FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id WHERE i.account_id=$1 AND false ORDER BY i.due_date`, a, today)
+			return
+		}
+		placeholders := make([]string, len(propIDs))
+		args := make([]any, len(propIDs)+2)
+		args[0] = a
+		args[1] = today
+		for i, id := range propIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+3)
+			args[i+2] = id
+		}
+		query := fmt.Sprintf(`SELECT i.id,i.tenant_id,t.full_name AS tenant_name,i.lease_id,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,($2::date-i.due_date) AS days_overdue,u.code AS unit_code FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id JOIN properties p ON p.id=u.property_id AND p.account_id=l.account_id WHERE i.account_id=$1 AND i.due_date<$2::date AND i.paid_amount<i.amount AND p.id IN (%s) ORDER BY i.due_date`, strings.Join(placeholders, ","))
+		rows(w, r, query, args...)
+		return
+	}
+	if e := s.ensureInvoices(r, a); e != nil {
+		writeErr(w, 500, "invoice_generation_failed", "could not create monthly invoices")
+		return
+	}
+	today = time.Now().In(time.FixedZone("EAT", 3*60*60)).Format("2006-01-02")
+	rows(w, r, `SELECT i.id,i.tenant_id,t.full_name AS tenant_name,i.lease_id,i.period,i.due_date,i.amount,i.paid_amount,(i.amount-i.paid_amount) AS balance,($2::date-i.due_date) AS days_overdue,u.code AS unit_code FROM invoices i JOIN tenants t ON t.id=i.tenant_id AND t.account_id=i.account_id JOIN leases l ON l.id=i.lease_id AND l.account_id=i.account_id JOIN units u ON u.id=l.unit_id AND u.account_id=l.account_id WHERE i.account_id=$1 AND i.due_date<$2::date AND i.paid_amount<i.amount ORDER BY i.due_date`, a, today)
 }
 func (s *Server) RunBillingScheduler(ctx context.Context) {
 	run := func() {
