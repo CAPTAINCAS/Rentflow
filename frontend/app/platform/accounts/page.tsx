@@ -18,7 +18,7 @@ export default function PlatformAccountsPage() {
       <div className="page-header"><h1>Accounts</h1><p>Platform landlords and accounts</p></div>
       <input className="search-input" placeholder="Search accounts" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
       <div className="panel"><div className="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Properties</th><th>Tenants</th></tr></thead><tbody>
-        {accounts.length === 0 ? <tr><td colSpan={4}>No accounts found</td></tr> : accounts.map((a: any) => (
+        {accounts.length === 0 ? <tr><td colSpan={4}>No accounts found</td></tr> : accounts.map((a: { id: string; name: string; subscription_status: string; property_count: number; tenant_count: number }) => (
           <tr key={a.id}><td>{a.name}</td><td>{a.subscription_status}</td><td>{a.property_count}</td><td>{a.tenant_count}</td></tr>
         ))}
       </tbody></table></div></div>

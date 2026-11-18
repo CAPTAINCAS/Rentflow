@@ -334,7 +334,7 @@ function TenantHome({ paymentsOnly = false }: { paymentsOnly?: boolean }) {
         <Metric label="Lease status" value={stringValue(dash?.lease_status) || "—"} note={dash?.lease_end ? `Expires ${stringValue(dash.lease_end)}` : ""} />
       </div>}
     </Panel>}
-    {!paymentsOnly && <div className="summary-band"><Metric label="Outstanding balance" value={invoices.isError ? "—" : formatMoney(outstanding)} note="Calculated from your invoice balances" /><Metric label="Invoices" value={invoices.data ? String(invoices.data.length) : "—"} /><Metric label="Payments recorded" value={payments.data ? String(payments.data.length) : "—"} /><Metric label="Maintenance" value={dash?.maintenance ? String((dash.maintenance as any).pending ?? 0) : "—"} note="Pending requests" /></div>}
+    {!paymentsOnly && <div className="summary-band"><Metric label="Outstanding balance" value={invoices.isError ? "—" : formatMoney(outstanding)} note="Calculated from your invoice balances" /><Metric label="Invoices" value={invoices.data ? String(invoices.data.length) : "—"} /><Metric label="Payments recorded" value={payments.data ? String(payments.data.length) : "—"} /><Metric label="Maintenance" value={dash?.maintenance ? String((dash.maintenance as { pending?: number }).pending ?? 0) : "—"} note="Pending requests" /></div>}
     {message && <div className={`notice ${stk.isError ? "notice-error" : "notice-success"}`} role="status">{message}</div>}
     {form && <Panel title="M-Pesa payment request" aside={<button className="text-button" onClick={() => setForm(false)}>Close</button>}>
       <form className="inline-form" onSubmit={event => { event.preventDefault(); stk.mutate(); }}>

@@ -22,7 +22,7 @@ export default function PlatformAuditPage() {
         <input className="search-input" placeholder="Resource type" value={resourceType} onChange={(e) => { setResourceType(e.target.value); setPage(1); }} />
       </div>
       <div className="panel"><div className="table-wrap"><table><thead><tr><th>Action</th><th>Resource</th><th>Actor</th><th>Account</th><th>Date</th></tr></thead><tbody>
-        {logs.length === 0 ? <tr><td colSpan={5}>No audit logs</td></tr> : logs.map((l: any) => (
+        {logs.length === 0 ? <tr><td colSpan={5}>No audit logs</td></tr> : logs.map((l: { id: string; action: string; resource_type: string; actor_email: string; account_id: string | null; created_at: string }) => (
           <tr key={l.id}><td>{l.action}</td><td>{l.resource_type}</td><td>{l.actor_email}</td><td>{l.account_id ?? "—"}</td><td>{l.created_at}</td></tr>
         ))}
       </tbody></table></div></div>

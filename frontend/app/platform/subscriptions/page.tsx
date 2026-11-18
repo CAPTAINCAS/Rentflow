@@ -20,7 +20,7 @@ export default function PlatformSubscriptionsPage() {
         <option value="">All</option><option value="active">Active</option><option value="trialing">Trialing</option><option value="past_due">Past due</option><option value="suspended">Suspended</option><option value="cancelled">Cancelled</option>
       </select>
       <div className="panel"><div className="table-wrap"><table><thead><tr><th>Account</th><th>Status</th><th>Plan</th><th>Renews</th><th>Expires</th></tr></thead><tbody>
-        {subs.length === 0 ? <tr><td colSpan={5}>No subscriptions</td></tr> : subs.map((s: any) => (
+        {subs.length === 0 ? <tr><td colSpan={5}>No subscriptions</td></tr> : subs.map((s: { account_id: string; account_name: string; status: string; plan_id: string | null; renews_at: string | null; expires_at: string | null }) => (
           <tr key={s.account_id}><td>{s.account_name}</td><td>{s.status}</td><td>{s.plan_id ?? "—"}</td><td>{s.renews_at ?? "—"}</td><td>{s.expires_at ?? "—"}</td></tr>
         ))}
       </tbody></table></div></div>

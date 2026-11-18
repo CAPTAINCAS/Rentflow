@@ -20,7 +20,7 @@ export default function PlatformPaymentsPage() {
         <option value="">All</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="failed">Failed</option>
       </select>
       <div className="panel"><div className="table-wrap"><table><thead><tr><th>Account</th><th>Amount</th><th>Status</th><th>Reference</th><th>Date</th></tr></thead><tbody>
-        {payments.length === 0 ? <tr><td colSpan={5}>No payments</td></tr> : payments.map((p: any) => (
+        {payments.length === 0 ? <tr><td colSpan={5}>No payments</td></tr> : payments.map((p: { id: string; account_name: string; amount: number; status: string; external_ref: string | null; created_at: string }) => (
           <tr key={p.id}><td>{p.account_name}</td><td>{p.amount}</td><td>{p.status}</td><td>{p.external_ref ?? "—"}</td><td>{p.created_at}</td></tr>
         ))}
       </tbody></table></div></div>
