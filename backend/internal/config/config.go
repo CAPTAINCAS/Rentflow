@@ -88,8 +88,8 @@ func (c Config) Validate() error {
 		if !strings.Contains(c.SuperAdminEmail, "@") {
 			problems = append(problems, "SUPER_ADMIN_EMAIL must be a valid email address")
 		}
-		if len(c.SuperAdminPassword) < minJWTSecretLength {
-			problems = append(problems, fmt.Sprintf("SUPER_ADMIN_PASSWORD must be at least %d characters", minJWTSecretLength))
+		if len(c.SuperAdminPassword) < 12 {
+			problems = append(problems, "SUPER_ADMIN_PASSWORD must be at least 12 characters")
 		}
 	}
 	if len(problems) > 0 {
