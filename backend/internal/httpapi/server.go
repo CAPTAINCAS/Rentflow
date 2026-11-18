@@ -946,19 +946,13 @@ func (s *Server) BootstrapSuperAdmin() error {
 	if exists {
 		return nil
 	}
-	var aid string
-	e = tx.QueryRow(context.Background(), `INSERT INTO accounts(name) VALUES($1) RETURNING id`, "Platform").Scan(&aid)
-	if e != nil {
-		s.Log.Warn("super_admin bootstrap could not create account", "error", e)
-		return e
-	}
 	hash, e := bcrypt.GenerateFromPassword([]byte(s.C.SuperAdminPassword), bcrypt.DefaultCost)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not hash password", "error", e)
 		return e
 	}
 	var uid string
-	e = tx.QueryRow(context.Background(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,'',$4,'super_admin') RETURNING id`, aid, s.C.SuperAdminEmail, s.C.SuperAdminName, string(hash)).Scan(&uid)
+	e = tx.QueryRow(context.Background(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES(NULL,lower($1),$2,'',$3,'super_admin') RETURNING id`, s.C.SuperAdminEmail, s.C.SuperAdminName, string(hash)).Scan(&uid)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not create user", "error", e)
 		return e
