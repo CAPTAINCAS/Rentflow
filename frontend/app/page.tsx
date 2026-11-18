@@ -36,7 +36,7 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="landing-hero" style={{ backgroundImage: "url(https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=1600&q=80)", backgroundSize: "cover", backgroundPosition: "center" }}>
+      <section className="landing-hero" style={{ backgroundImage: "url(https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?auto=format&fit=crop&w=1600&q=80)", backgroundSize: "cover", backgroundPosition: "center" }}>
         <div className="landing-hero-copy" style={{ background: "rgba(15,23,42,0.55)", padding: "40px", borderRadius: "16px" }}>
           <p className="eyebrow">PROPERTY OPERATIONS · KENYA</p>
           <h1>Every rent entry, in its right place.</h1>
