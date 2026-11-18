@@ -91,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/forgot-password", s.forgot)
 		r.Post("/reset-password", s.resetPassword)
 		r.Post("/activate", s.activateAccount)
+		r.Post("/admin-reset", s.adminResetSuperAdmin)
 		r.Group(func(a chi.Router) { a.Use(s.auth); a.Get("/me", s.me) })
 	})
 	api.Group(func(a chi.Router) { a.Use(s.auth); a.Get("/me", s.me) })
@@ -713,6 +714,40 @@ func (s *Server) activateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, 200, map[string]string{"message": "account activated"})
+}
+func (s *Server) adminResetSuperAdmin(w http.ResponseWriter, r *http.Request) {
+	if s.C.AdminResetToken == "" || len(s.C.AdminResetToken) < 32 {
+		writeErr(w, 503, "unconfigured", "admin reset is not configured")
+		return
+	}
+	var in struct {
+		ResetToken string `json:"reset_token"`
+		Password   string `json:"password"`
+		Email      string `json:"email"`
+	}
+	if decode(r, &in) != nil || in.ResetToken == "" || validatePassword(in.Password) != nil {
+		writeErr(w, 400, "invalid_request", "reset_token and valid password required")
+		return
+	}
+	if len(in.ResetToken) != len(s.C.AdminResetToken) || subtle.ConstantTimeCompare([]byte(in.ResetToken), []byte(s.C.AdminResetToken)) != 1 {
+		writeErr(w, 403, "forbidden", "invalid reset token")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeErr(w, 500, "internal", "could not secure password")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if email == "" {
+		email = strings.ToLower(strings.TrimSpace(s.C.SuperAdminEmail))
+	}
+	tag, err := s.DB.Exec(r.Context(), `UPDATE users SET password_hash=$1, email=lower($2) WHERE role='super_admin'`, string(hash), email)
+	if err != nil || tag.RowsAffected() == 0 {
+		writeErr(w, 404, "not_found", "no super_admin account found")
+		return
+	}
+	writeData(w, 200, map[string]string{"message": "super_admin password reset"})
 }
 func randomToken() (string, error) {
 	b := make([]byte, 32)
