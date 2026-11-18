@@ -77,7 +77,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const isTenant = role === "tenant";
   const isSuperAdmin = role === "super_admin";
   const isAgent = role === "agent";
-  const allowed = isSuperAdmin ? pathname.startsWith("/platform") || pathname === "/" : isTenant ? pathname.startsWith("/tenant") || pathname === "/" : isAgent ? !pathname.startsWith("/tenant") && !pathname.startsWith("/platform") : !pathname.startsWith("/tenant") && !pathname.startsWith("/platform");
+  const isTenantPath = pathname === "/tenant" || pathname.startsWith("/tenant/");
+  const allowed = isSuperAdmin ? pathname.startsWith("/platform") || pathname === "/" : isTenant ? isTenantPath || pathname === "/" : isAgent ? !isTenantPath && !pathname.startsWith("/platform") : !isTenantPath && !pathname.startsWith("/platform");
   if (!allowed && pathname !== "/") return <main className="session-loading"><Brand /><h1>This view isn’t available for your account.</h1><p className="muted">You’re signed in with the {role} role.</p><Link className="button button-outline" href={isSuperAdmin ? "/platform" : isTenant ? "/tenant" : isAgent ? "/agent" : "/dashboard"}>Go to your account</Link></main>;
   const links = isSuperAdmin ? superAdminLinks : isTenant ? tenantLinks : isAgent ? agentLinks : landlordLinks;
   const name = stringValue(session.name ?? session.full_name ?? session.email) || "Account";
