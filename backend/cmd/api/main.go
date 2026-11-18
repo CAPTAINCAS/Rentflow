@@ -68,7 +68,9 @@ func run(log *slog.Logger) error {
 	}
 
 	api := httpapi.New(cfg, pool, log)
-	api.BootstrapSuperAdmin()
+	if err := api.BootstrapSuperAdmin(); err != nil {
+		log.Error("super_admin bootstrap failed", "error", err.Error())
+	}
 	schedulerCtx, schedulerCancel := context.WithCancel(context.Background())
 	defer schedulerCancel()
 	go api.RunBillingScheduler(schedulerCtx)

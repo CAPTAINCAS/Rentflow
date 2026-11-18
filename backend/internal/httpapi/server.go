@@ -846,45 +846,50 @@ func (s *Server) bind(next http.Handler) http.Handler {
 // logged. Call this after migrations have run and the server is constructed.
 // All account and user creation happens inside a single database transaction
 // so a partial failure cannot leave an orphaned account.
-func (s *Server) BootstrapSuperAdmin() {
+func (s *Server) BootstrapSuperAdmin() error {
 	if s.C.SuperAdminEmail == "" || s.C.SuperAdminPassword == "" {
-		return
+		return nil
+	}
+	if err := validatePassword(s.C.SuperAdminPassword); err != nil {
+		s.Log.Error("super_admin bootstrap password does not meet policy", "error", err.Error())
+		return err
 	}
 	tx, e := s.DB.Begin(context.Background())
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not start transaction", "error", e)
-		return
+		return e
 	}
 	defer tx.Rollback(context.Background())
 	var exists bool
 	e = tx.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM users WHERE role='super_admin')`).Scan(&exists)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not check existing users", "error", e)
-		return
+		return e
 	}
 	if exists {
-		return
+		return nil
 	}
 	var aid string
 	e = tx.QueryRow(context.Background(), `INSERT INTO accounts(name) VALUES($1) RETURNING id`, "Platform").Scan(&aid)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not create account", "error", e)
-		return
+		return e
 	}
 	hash, e := bcrypt.GenerateFromPassword([]byte(s.C.SuperAdminPassword), bcrypt.DefaultCost)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not hash password", "error", e)
-		return
+		return e
 	}
 	var uid string
 	e = tx.QueryRow(context.Background(), `INSERT INTO users(account_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,'',$4,'super_admin') RETURNING id`, aid, s.C.SuperAdminEmail, s.C.SuperAdminName, string(hash)).Scan(&uid)
 	if e != nil {
 		s.Log.Warn("super_admin bootstrap could not create user", "error", e)
-		return
+		return e
 	}
 	if e = tx.Commit(context.Background()); e != nil {
 		s.Log.Warn("super_admin bootstrap could not commit transaction", "error", e)
-		return
+		return e
 	}
 	s.Log.Info("super_admin bootstrap created platform account", "user_id", uid)
+	return nil
 }
