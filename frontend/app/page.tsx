@@ -36,8 +36,8 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="landing-hero">
-        <div className="landing-hero-copy">
+      <section className="landing-hero" style={{ backgroundImage: "url(https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=1600&q=80)", backgroundSize: "cover", backgroundPosition: "center" }}>
+        <div className="landing-hero-copy" style={{ background: "rgba(15,23,42,0.55)", padding: "40px", borderRadius: "16px" }}>
           <p className="eyebrow">PROPERTY OPERATIONS · KENYA</p>
           <h1>Every rent entry, in its right place.</h1>
           <p className="landing-hero-sub">RentFlow keeps property, tenant, lease, payment and maintenance records clear, accurate and easy to act on — for landlords, agents and tenants.</p>
