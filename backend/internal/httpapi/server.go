@@ -39,6 +39,7 @@ type Server struct {
 	Log               *slog.Logger
 	HTTP              *http.Client
 	SMS               SMSProvider
+	Email             EmailProvider
 	proxy             http.Handler
 	tokenMu           sync.Mutex
 	darajaTokenValue  string
@@ -63,7 +64,7 @@ type apiError struct {
 }
 
 func New(c config.Config, db *pgxpool.Pool, l *slog.Logger) *Server {
-	return &Server{C: c, DB: db, Queries: dbgen.New(db), Log: l, HTTP: &http.Client{Timeout: 15 * time.Second}, SMS: newSMS(c, l)}
+	return &Server{C: c, DB: db, Queries: dbgen.New(db), Log: l, HTTP: &http.Client{Timeout: 15 * time.Second}, SMS: newSMS(c, l), Email: newEmailProvider(c, l)}
 }
 
 // Handler returns the public API and health routes only. Page proxying is a
@@ -89,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/logout", s.logout)
 		r.Post("/forgot-password", s.forgot)
 		r.Post("/reset-password", s.resetPassword)
+		r.Post("/activate", s.activateAccount)
 		r.Group(func(a chi.Router) { a.Use(s.auth); a.Get("/me", s.me) })
 	})
 	api.Group(func(a chi.Router) { a.Use(s.auth); a.Get("/me", s.me) })
@@ -109,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 		a.Post("/team/agents", s.createAgent)
 		a.Get("/tenants", s.listTenants)
 		a.Post("/tenants", s.createTenant)
+		a.Post("/tenants/{id}/resend-invitation", s.resendTenantInvitation)
 		a.Patch("/tenants/{id}", s.patchTenant)
 		a.Delete("/tenants/{id}", s.deleteTenant)
 		a.Get("/leases", s.listLeases)
@@ -672,6 +675,45 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) activateAccount(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if decode(r, &in) != nil || in.Token == "" || validatePassword(in.Password) != nil {
+		writeErr(w, 400, "invalid_request", "valid token and password of at least 10 characters are required")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeErr(w, 500, "internal", "could not secure password")
+		return
+	}
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		writeErr(w, 500, "internal", "database error")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var uid string
+	err = tx.QueryRow(r.Context(), `SELECT user_id FROM tenant_invitations WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE`, tokenHash(in.Token)).Scan(&uid)
+	if err != nil {
+		writeErr(w, 400, "invalid_invitation", "invitation is invalid or expired")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `UPDATE users SET password_hash=$2 WHERE id=$1`, uid, string(hash)); err == nil {
+		_, err = tx.Exec(r.Context(), `UPDATE tenant_invitations SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL`, tokenHash(in.Token))
+	}
+	if err != nil {
+		writeErr(w, 500, "internal", "could not activate account")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeErr(w, 500, "internal", "could not activate account")
+		return
+	}
+	writeData(w, 200, map[string]string{"message": "account activated"})
+}
 func randomToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

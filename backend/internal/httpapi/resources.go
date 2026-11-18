@@ -406,10 +406,9 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		Email      string `json:"email"`
 		Phone      string `json:"phone"`
 		NationalID string `json:"national_id"`
-		Password   string `json:"password"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") || validatePassword(in.Password) != nil {
-		writeErr(w, 400, "invalid_request", "full_name, valid email, and password of at least 10 characters are required")
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || !strings.Contains(in.Email, "@") {
+		writeErr(w, 400, "invalid_request", "full_name and valid email are required")
 		return
 	}
 	tx, e := s.DB.Begin(r.Context())
@@ -418,7 +417,7 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var id string
+	var id, uid string
 	a, e := s.effectiveAccountID(r)
 	if e != nil {
 		writeErr(w, 500, "database_error", "could not resolve account")
@@ -426,21 +425,78 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	e = tx.QueryRow(r.Context(), `INSERT INTO tenants(account_id,full_name,email,phone,national_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, a, in.Name, strings.ToLower(in.Email), in.Phone, in.NationalID).Scan(&id)
 	if e == nil {
-		var hash []byte
-		hash, e = bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-		if e == nil {
-			_, e = tx.Exec(r.Context(), `INSERT INTO users(tenant_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,$4,$5,'tenant')`, id, in.Email, in.Name, in.Phone, string(hash))
-		}
+		// Create user with an unusable password hash; activation sets real password.
+		unusable, _ := bcrypt.GenerateFromPassword([]byte("unusable-placeholder-hash"), bcrypt.DefaultCost)
+		e = tx.QueryRow(r.Context(), `INSERT INTO users(tenant_id,email,full_name,phone,password_hash,role) VALUES($1,lower($2),$3,$4,$5,'tenant') RETURNING id`, id, in.Email, in.Name, in.Phone, string(unusable)).Scan(&uid)
 	}
 	if e != nil {
 		writeErr(w, 409, "tenant_create_failed", "could not create tenant or linked login (email may already be registered)")
+		return
+	}
+	// Generate single-use activation token.
+	raw, terr := randomToken()
+	if terr != nil {
+		writeErr(w, 500, "internal", "could not generate invitation")
+		return
+	}
+	_, terr = tx.Exec(r.Context(), `INSERT INTO tenant_invitations(account_id,tenant_id,user_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '7 days')`, a, id, uid, tokenHash(raw))
+	if terr != nil {
+		writeErr(w, 500, "internal", "could not store invitation")
 		return
 	}
 	if e = tx.Commit(r.Context()); e != nil {
 		writeErr(w, 500, "database_error", "could not save tenant")
 		return
 	}
+	link := buildActivationLink(s.C, raw)
+	if s.C.Env == "development" {
+		s.Log.Info("tenant activation link issued", "email", in.Email, "url", link)
+	}
+	if s.Email != nil {
+		_ = s.Email.Send(in.Email, "Activate your RentFlow account", "Welcome to RentFlow. Activate your account: "+link)
+	}
 	writeData(w, 201, map[string]any{"id": id, "full_name": in.Name, "email": in.Email, "phone": in.Phone, "national_id": in.NationalID})
+}
+func (s *Server) resendTenantInvitation(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if p.Role != "landlord" && p.Role != "super_admin" {
+		writeErr(w, 403, "forbidden", "only landlords or super_admins can resend invitations")
+		return
+	}
+	if !s.manager(w, r) {
+		return
+	}
+	a, e := s.effectiveAccountID(r)
+	if e != nil {
+		writeErr(w, 500, "database_error", "could not resolve account")
+		return
+	}
+	tenantID := uuidParam(r)
+	// verify tenant belongs to account
+	var uid, email string
+	e = s.DB.QueryRow(r.Context(), `SELECT u.id, u.email FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE t.id=$1 AND t.account_id=$2 AND u.role='tenant'`, tenantID, a).Scan(&uid, &email)
+	if e != nil {
+		writeErr(w, 404, "not_found", "tenant not found")
+		return
+	}
+	raw, terr := randomToken()
+	if terr != nil {
+		writeErr(w, 500, "internal", "could not generate invitation")
+		return
+	}
+	_, terr = s.DB.Exec(r.Context(), `INSERT INTO tenant_invitations(account_id,tenant_id,user_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '7 days')`, a, tenantID, uid, tokenHash(raw))
+	if terr != nil {
+		writeErr(w, 500, "internal", "could not store invitation")
+		return
+	}
+	link := buildActivationLink(s.C, raw)
+	if s.C.Env == "development" {
+		s.Log.Info("tenant activation link reissued", "email", email, "url", link)
+	}
+	if s.Email != nil {
+		_ = s.Email.Send(email, "Activate your RentFlow account", "Activate your account: "+link)
+	}
+	writeData(w, 200, map[string]string{"message": "invitation sent"})
 }
 func (s *Server) patchTenant(w http.ResponseWriter, r *http.Request) {
 	if !s.manager(w, r) {
